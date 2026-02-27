@@ -10,7 +10,7 @@
 import { anthropicProvider } from './anthropic';
 import { OpenAIProvider as openaiProvider } from './openai';
 import { googleProvider } from './google';
-import { bedrockProvider, parseBedrockCredentials, computeBedrockHeaders } from './bedrock';
+import { bedrockProvider } from './bedrock';
 import {
   LLMProvider,
   ProviderId,
@@ -185,16 +185,11 @@ export async function callProvider(
 
   // Determine endpoint and headers (provider-specific overrides)
   let endpoint = provider.endpoint;
-  let headers = provider.getHeaders(apiKey);
+  const headers = provider.getHeaders(apiKey);
 
   if (providerId === 'google') {
     // Google requires model and key in URL
     endpoint = `${provider.endpoint}/${config.model}:generateContent?key=${apiKey.trim()}`;
-  } else if (providerId === 'bedrock') {
-    // Bedrock: build per-model endpoint and compute SigV4-signed headers
-    const creds = parseBedrockCredentials(apiKey);
-    endpoint = `https://bedrock-runtime.${creds.region}.amazonaws.com/model/${encodeURIComponent(config.model)}/invoke`;
-    headers = await computeBedrockHeaders(endpoint, bodyStr, creds);
   }
 
   try {
@@ -202,7 +197,7 @@ export async function callProvider(
 
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: headers,
+      headers,
       body: bodyStr,
     });
 
