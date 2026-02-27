@@ -14,7 +14,7 @@
 /**
  * Supported LLM provider identifiers
  */
-export type ProviderId = 'anthropic' | 'openai' | 'google';
+export type ProviderId = 'anthropic' | 'openai' | 'google' | 'bedrock';
 
 /**
  * Model tier classification for pricing and capability guidance
@@ -459,6 +459,7 @@ export const DEFAULT_MODELS: Record<ProviderId, string> = {
   anthropic: 'claude-sonnet-4-5-20250929',
   openai: 'gpt-5.2',
   google: 'gemini-2.5-pro',
+  bedrock: 'anthropic.claude-3-5-sonnet-20241022',
 };
 
 // =============================================================================
@@ -552,6 +553,11 @@ export function validateApiKeyFormat(apiKey: string, providerId: ProviderId): bo
       return trimmed.startsWith('sk-') && trimmed.length >= 20;
     case 'google':
       return trimmed.startsWith('AIza') && trimmed.length >= 35;
+    case 'bedrock': {
+      // Expect "ACCESS_KEY_ID:SECRET_ACCESS_KEY[:REGION[:SESSION_TOKEN]]"
+      const parts = trimmed.split(':');
+      return parts.length >= 2 && parts[0].length >= 16 && parts[1].length > 0;
+    }
     default:
       return false;
   }
@@ -584,6 +590,9 @@ export function getModelsForProvider(providerId: ProviderId): LLMModel[] {
       return OPENAI_MODELS;
     case 'google':
       return GOOGLE_MODELS;
+    case 'bedrock':
+      // Imported at runtime to avoid circular deps; models listed here for type safety
+      return [];
     default:
       return [];
   }

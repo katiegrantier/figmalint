@@ -10,6 +10,7 @@
 import { anthropicProvider } from './anthropic';
 import { OpenAIProvider as openaiProvider } from './openai';
 import { googleProvider } from './google';
+import { bedrockProvider, parseBedrockCredentials, computeBedrockHeaders } from './bedrock';
 import {
   LLMProvider,
   ProviderId,
@@ -29,6 +30,7 @@ export * from './types';
 export { anthropicProvider } from './anthropic';
 export { OpenAIProvider as openaiProvider } from './openai';
 export { googleProvider } from './google';
+export { bedrockProvider } from './bedrock';
 
 // =============================================================================
 // Provider Registry
@@ -41,12 +43,13 @@ export const providers: ProviderRegistry = {
   anthropic: anthropicProvider,
   openai: openaiProvider,
   google: googleProvider,
+  bedrock: bedrockProvider,
 };
 
 /**
  * Array of all provider IDs for iteration
  */
-export const providerIds: ProviderId[] = ['anthropic', 'openai', 'google'];
+export const providerIds: ProviderId[] = ['anthropic', 'openai', 'google', 'bedrock'];
 
 /**
  * Provider metadata for UI display
@@ -66,6 +69,11 @@ export const providerMeta: Record<ProviderId, { name: string; icon: string; desc
     name: 'Google (Gemini)',
     icon: '🔵',
     description: 'Gemini models with multimodal understanding and large context windows',
+  },
+  bedrock: {
+    name: 'Amazon Bedrock',
+    icon: '🟠',
+    description: 'Claude models via AWS Bedrock — uses AWS IAM credentials, no separate API key needed',
   },
 };
 
@@ -173,13 +181,20 @@ export async function callProvider(
 
   // Build request
   const requestBody = provider.formatRequest(config);
-  const headers = provider.getHeaders(apiKey);
+  const bodyStr = JSON.stringify(requestBody);
 
-  // Determine endpoint (Google has special URL handling)
+  // Determine endpoint and headers (provider-specific overrides)
   let endpoint = provider.endpoint;
+  let headers = provider.getHeaders(apiKey);
+
   if (providerId === 'google') {
     // Google requires model and key in URL
     endpoint = `${provider.endpoint}/${config.model}:generateContent?key=${apiKey.trim()}`;
+  } else if (providerId === 'bedrock') {
+    // Bedrock: build per-model endpoint and compute SigV4-signed headers
+    const creds = parseBedrockCredentials(apiKey);
+    endpoint = `https://bedrock-runtime.${creds.region}.amazonaws.com/model/${encodeURIComponent(config.model)}/invoke`;
+    headers = await computeBedrockHeaders(endpoint, bodyStr, creds);
   }
 
   try {
@@ -188,7 +203,7 @@ export async function callProvider(
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: headers,
-      body: JSON.stringify(requestBody),
+      body: bodyStr,
     });
 
     if (!response.ok) {

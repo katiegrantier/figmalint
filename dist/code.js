@@ -32,11 +32,11 @@
     return true;
   }
   function rgbToHex(r, g, b) {
-    const toHex = (n) => {
+    const toHex2 = (n) => {
       const hex = Math.round(n * 255).toString(16);
       return hex.length === 1 ? "0" + hex : hex;
     };
-    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+    return `#${toHex2(r)}${toHex2(g)}${toHex2(b)}`;
   }
   async function getVariableName(variableId) {
     try {
@@ -1221,7 +1221,8 @@ Focus on creating a comprehensive DESIGN analysis that helps designers build sca
   var DEFAULT_MODELS = {
     anthropic: "claude-sonnet-4-5-20250929",
     openai: "gpt-5.2",
-    google: "gemini-2.5-pro"
+    google: "gemini-2.5-pro",
+    bedrock: "anthropic.claude-3-5-sonnet-20241022"
   };
 
   // src/api/providers/anthropic.ts
@@ -1967,11 +1968,288 @@ Focus on creating a comprehensive DESIGN analysis that helps designers build sca
   };
   var googleProvider = new GoogleProvider();
 
+  // src/api/providers/bedrock.ts
+  var DEFAULT_REGION = "us-east-1";
+  var BEDROCK_SERVICE = "bedrock-runtime";
+  var BEDROCK_MODELS = [
+    {
+      id: "anthropic.claude-3-opus-20240229",
+      name: "Claude 3 Opus (Bedrock)",
+      description: "Flagship model via AWS Bedrock - Most capable for complex design analysis",
+      tier: "flagship",
+      contextWindow: 2e5,
+      maxOutputTokens: 4096,
+      isDefault: false
+    },
+    {
+      id: "anthropic.claude-3-5-sonnet-20241022",
+      name: "Claude 3.5 Sonnet (Bedrock)",
+      description: "Standard model via AWS Bedrock - Balanced performance and cost",
+      tier: "standard",
+      contextWindow: 2e5,
+      maxOutputTokens: 8192,
+      isDefault: true
+    },
+    {
+      id: "anthropic.claude-3-5-haiku-20241022",
+      name: "Claude 3.5 Haiku (Bedrock)",
+      description: "Economy model via AWS Bedrock - Fast responses, cost-effective",
+      tier: "economy",
+      contextWindow: 2e5,
+      maxOutputTokens: 8192,
+      isDefault: false
+    }
+  ];
+  function parseBedrockCredentials(credential) {
+    var _a, _b, _c;
+    const parts = credential.trim().split(":");
+    return {
+      accessKeyId: (_a = parts[0]) != null ? _a : "",
+      secretAccessKey: (_b = parts[1]) != null ? _b : "",
+      region: (_c = parts[2]) != null ? _c : DEFAULT_REGION,
+      sessionToken: parts[3]
+    };
+  }
+  function toHex(buffer) {
+    return Array.from(new Uint8Array(buffer)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  async function sha256Hex(data) {
+    const encoded = new TextEncoder().encode(data);
+    const hash = await crypto.subtle.digest("SHA-256", encoded);
+    return toHex(hash);
+  }
+  async function hmacSha256(key, data) {
+    const cryptoKey = await crypto.subtle.importKey(
+      "raw",
+      key,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    return crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(data));
+  }
+  async function computeBedrockHeaders(endpoint, body, credentials) {
+    const { accessKeyId, secretAccessKey, region, sessionToken } = credentials;
+    const now = /* @__PURE__ */ new Date();
+    const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, "").slice(0, 15) + "Z";
+    const dateStamp = amzDate.slice(0, 8);
+    const urlObj = new URL(endpoint);
+    const host = urlObj.host;
+    const canonicalUri = urlObj.pathname;
+    const payloadHash = await sha256Hex(body);
+    const canonicalHeadersList = [
+      ["content-type", "application/json"],
+      ["host", host],
+      ["x-amz-date", amzDate]
+    ];
+    if (sessionToken) {
+      canonicalHeadersList.push(["x-amz-security-token", sessionToken]);
+    }
+    canonicalHeadersList.sort((a, b) => a[0].localeCompare(b[0]));
+    const canonicalHeaders = canonicalHeadersList.map(([k, v]) => `${k}:${v}`).join("\n") + "\n";
+    const signedHeaders = canonicalHeadersList.map(([k]) => k).join(";");
+    const canonicalRequest = [
+      "POST",
+      canonicalUri,
+      "",
+      // no query string
+      canonicalHeaders,
+      signedHeaders,
+      payloadHash
+    ].join("\n");
+    const credentialScope = `${dateStamp}/${region}/${BEDROCK_SERVICE}/aws4_request`;
+    const stringToSign = [
+      "AWS4-HMAC-SHA256",
+      amzDate,
+      credentialScope,
+      await sha256Hex(canonicalRequest)
+    ].join("\n");
+    const encoder = new TextEncoder();
+    const kDate = await hmacSha256(encoder.encode(`AWS4${secretAccessKey}`), dateStamp);
+    const kRegion = await hmacSha256(kDate, region);
+    const kService = await hmacSha256(kRegion, BEDROCK_SERVICE);
+    const kSigning = await hmacSha256(kService, "aws4_request");
+    const signature = toHex(await hmacSha256(kSigning, stringToSign));
+    const authorization = `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+    const headers = {
+      "content-type": "application/json",
+      "x-amz-date": amzDate,
+      Authorization: authorization
+    };
+    if (sessionToken) {
+      headers["x-amz-security-token"] = sessionToken;
+    }
+    return headers;
+  }
+  var BedrockProvider = class {
+    constructor() {
+      this.name = "Amazon Bedrock";
+      this.id = "bedrock";
+      // Endpoint is dynamic per-model; this is used as the base for display only
+      this.endpoint = "https://bedrock-runtime.amazonaws.com";
+      // AWS access keys start with AKIA (long-term) or ASIA (temporary)
+      this.keyPrefix = "AKIA";
+      this.keyPlaceholder = "AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY:us-east-1";
+      this.models = BEDROCK_MODELS;
+    }
+    /**
+     * Format a request body for Bedrock's Claude InvokeModel API.
+     * Note: model ID is NOT included in the body — it's part of the URL.
+     */
+    formatRequest(config) {
+      const request = {
+        anthropic_version: "bedrock-2023-05-31",
+        messages: [
+          {
+            role: "user",
+            content: config.prompt.trim()
+          }
+        ],
+        max_tokens: config.maxTokens,
+        temperature: config.temperature
+      };
+      if (config.additionalParams) {
+        Object.assign(request, config.additionalParams);
+      }
+      return request;
+    }
+    /**
+     * Parse Bedrock's Claude response into the standardized LLMResponse format.
+     */
+    parseResponse(response) {
+      const bedrockResponse = response;
+      if (!bedrockResponse.content || !Array.isArray(bedrockResponse.content)) {
+        throw new LLMError(
+          "Invalid response from Bedrock: missing content array",
+          "INVALID_REQUEST" /* INVALID_REQUEST */
+        );
+      }
+      const textContent = bedrockResponse.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+      if (!textContent) {
+        throw new LLMError(
+          "Invalid response from Bedrock: no text content found",
+          "INVALID_REQUEST" /* INVALID_REQUEST */
+        );
+      }
+      return {
+        content: textContent.trim(),
+        model: bedrockResponse.model,
+        usage: bedrockResponse.usage ? {
+          promptTokens: bedrockResponse.usage.input_tokens,
+          completionTokens: bedrockResponse.usage.output_tokens,
+          totalTokens: bedrockResponse.usage.input_tokens + bedrockResponse.usage.output_tokens
+        } : void 0,
+        metadata: {
+          id: bedrockResponse.id,
+          stopReason: bedrockResponse.stop_reason
+        }
+      };
+    }
+    /**
+     * Validate that the credential string has at least ACCESS_KEY_ID:SECRET_ACCESS_KEY.
+     */
+    validateApiKey(apiKey) {
+      if (!apiKey || typeof apiKey !== "string") {
+        return {
+          isValid: false,
+          error: "Credentials required. Use format: ACCESS_KEY_ID:SECRET_ACCESS_KEY[:REGION]"
+        };
+      }
+      const trimmed = apiKey.trim();
+      const parts = trimmed.split(":");
+      if (parts.length < 2 || !parts[0] || !parts[1]) {
+        return {
+          isValid: false,
+          error: "Invalid credential format. Expected: ACCESS_KEY_ID:SECRET_ACCESS_KEY or ACCESS_KEY_ID:SECRET_ACCESS_KEY:REGION"
+        };
+      }
+      const accessKeyId = parts[0];
+      if (accessKeyId.length < 16 || accessKeyId.length > 128) {
+        return {
+          isValid: false,
+          error: "Invalid AWS Access Key ID. Please check your credentials."
+        };
+      }
+      const secretAccessKey = parts[1];
+      if (secretAccessKey.length < 1) {
+        return {
+          isValid: false,
+          error: "AWS Secret Access Key cannot be empty."
+        };
+      }
+      return { isValid: true };
+    }
+    /**
+     * Returns basic content-type header only.
+     * SigV4 Authorization is computed asynchronously in callProvider (index.ts).
+     */
+    getHeaders(_apiKey) {
+      return {
+        "content-type": "application/json"
+      };
+    }
+    getDefaultModel() {
+      var _a;
+      return (_a = this.models.find((m) => m.isDefault)) != null ? _a : this.models[1];
+    }
+    handleError(statusCode, response) {
+      const errorResponse = response;
+      const errorMessage = (errorResponse == null ? void 0 : errorResponse.message) || (typeof response === "string" ? response : "Unknown error");
+      switch (statusCode) {
+        case 400:
+          return new LLMError(
+            `Bedrock Error (400): ${errorMessage}. Check your request format.`,
+            "INVALID_REQUEST" /* INVALID_REQUEST */,
+            400
+          );
+        case 401:
+        case 403:
+          return new LLMError(
+            `Bedrock Error (${statusCode}): Access denied. Check your AWS credentials and IAM permissions.`,
+            "INVALID_API_KEY" /* INVALID_API_KEY */,
+            statusCode
+          );
+        case 404:
+          return new LLMError(
+            `Bedrock Error (404): Model not found. Verify the model ID is available in your region.`,
+            "MODEL_NOT_FOUND" /* MODEL_NOT_FOUND */,
+            404
+          );
+        case 429:
+          return new LLMError(
+            "Bedrock Error (429): Throttled. Please try again later.",
+            "RATE_LIMIT_EXCEEDED" /* RATE_LIMIT_EXCEEDED */,
+            429
+          );
+        case 500:
+          return new LLMError(
+            "Bedrock Error (500): Internal server error. Please try again.",
+            "SERVER_ERROR" /* SERVER_ERROR */,
+            500
+          );
+        case 503:
+          return new LLMError(
+            "Bedrock Error (503): Service unavailable. Please try again later.",
+            "SERVICE_UNAVAILABLE" /* SERVICE_UNAVAILABLE */,
+            503
+          );
+        default:
+          return new LLMError(
+            `Bedrock Error (${statusCode}): ${errorMessage}`,
+            "UNKNOWN_ERROR" /* UNKNOWN_ERROR */,
+            statusCode
+          );
+      }
+    }
+  };
+  var bedrockProvider = new BedrockProvider();
+
   // src/api/providers/index.ts
   var providers = {
     anthropic: anthropicProvider,
     openai: OpenAIProvider,
-    google: googleProvider
+    google: googleProvider,
+    bedrock: bedrockProvider
   };
   function getProvider(providerId) {
     const provider = providers[providerId];
@@ -1996,17 +2274,22 @@ Focus on creating a comprehensive DESIGN analysis that helps designers build sca
       );
     }
     const requestBody = provider.formatRequest(config);
-    const headers = provider.getHeaders(apiKey);
+    const bodyStr = JSON.stringify(requestBody);
     let endpoint = provider.endpoint;
+    let headers = provider.getHeaders(apiKey);
     if (providerId === "google") {
       endpoint = `${provider.endpoint}/${config.model}:generateContent?key=${apiKey.trim()}`;
+    } else if (providerId === "bedrock") {
+      const creds = parseBedrockCredentials(apiKey);
+      endpoint = `https://bedrock-runtime.${creds.region}.amazonaws.com/model/${encodeURIComponent(config.model)}/invoke`;
+      headers = await computeBedrockHeaders(endpoint, bodyStr, creds);
     }
     try {
       console.log(`Making ${provider.name} API call to ${endpoint}...`);
       const response = await fetch(endpoint, {
         method: "POST",
         headers,
-        body: JSON.stringify(requestBody)
+        body: bodyStr
       });
       if (!response.ok) {
         let errorData;
