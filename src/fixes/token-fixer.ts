@@ -1,6 +1,7 @@
 /// <reference types="@figma/plugin-typings" />
 
 import { rgbToHex } from '../utils/figma-helpers';
+import { TokenAnalysis, AutoApplyResult, AutoApplyEntry } from '../types';
 
 // ============================================================================
 // Types
@@ -79,6 +80,60 @@ export type SpacingPropertyType =
   | 'bottomLeftRadius'
   | 'bottomRightRadius'
   | 'strokeWeight';
+
+/**
+ * A variable resolved from a team library collection
+ */
+export interface LibraryVariable {
+  key: string;
+  name: string;
+  resolvedType: 'COLOR' | 'FLOAT' | 'STRING' | 'BOOLEAN';
+  valuesByMode: Record<string, any>;
+  defaultModeId: string;
+  collectionName: string;
+  libraryName: string;
+}
+
+// ============================================================================
+// Library Variable Fetching
+// ============================================================================
+
+/**
+ * Fetch all variables from designated Figma team library collections.
+ * Returns a flat array of LibraryVariable objects.
+ */
+export async function getLibraryVariables(libraryNames: string[]): Promise<LibraryVariable[]> {
+  if (!libraryNames || libraryNames.length === 0) return [];
+
+  try {
+    const allCollections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+    const matchingCollections = allCollections.filter(col => libraryNames.includes(col.libraryName));
+
+    const results: LibraryVariable[] = [];
+    for (const collection of matchingCollections) {
+      try {
+        const vars = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(collection.key);
+        for (const v of vars) {
+          results.push({
+            key: v.key,
+            name: v.name,
+            resolvedType: v.resolvedType as 'COLOR' | 'FLOAT' | 'STRING' | 'BOOLEAN',
+            valuesByMode: v.valuesByMode,
+            defaultModeId: collection.defaultModeId,
+            collectionName: collection.name,
+            libraryName: collection.libraryName,
+          });
+        }
+      } catch (err) {
+        console.warn(`Could not fetch variables for collection ${collection.name}:`, err);
+      }
+    }
+    return results;
+  } catch (err) {
+    console.warn('getLibraryVariables failed:', err);
+    return [];
+  }
+}
 
 // ============================================================================
 // Token Binding Functions
@@ -469,61 +524,83 @@ export async function findOrCreateVariableCollection(
 // ============================================================================
 
 /**
- * Find existing variables that match a given hex color
+ * Find existing variables that match a given hex color.
  *
  * @param hexColor - Hex color to match (e.g., '#FF0000')
- * @param tolerance - Color tolerance (0-1, default 0 for exact match)
+ * @param tolerance - Color tolerance (0-1, default 0 for exact match). When matching
+ *   against library variables the caller should pass a fractional tolerance derived from
+ *   the RGB Euclidean-distance threshold (e.g. 10/255 ≈ 0.039).
+ * @param libraryVariables - Optional pre-fetched library variables. When provided the
+ *   local variable store is skipped entirely and only these are searched.
  * @returns Array of matching token suggestions sorted by match score
  */
 export async function findMatchingColorVariable(
   hexColor: string,
-  tolerance: number = 0
-): Promise<TokenSuggestion[]> {
+  tolerance: number = 0,
+  libraryVariables?: LibraryVariable[]
+): Promise<(TokenSuggestion & { variableKey?: string })[]> {
   try {
     const targetRgb = hexToRgb(hexColor);
     if (!targetRgb) {
       return [];
     }
 
-    const suggestions: TokenSuggestion[] = [];
+    const suggestions: (TokenSuggestion & { variableKey?: string })[] = [];
 
-    // Get all color variables
-    const colorVariables = await figma.variables.getLocalVariablesAsync('COLOR');
-    const collections = await figma.variables.getLocalVariableCollectionsAsync();
+    if (libraryVariables) {
+      // Search against pre-fetched library variables
+      for (const v of libraryVariables) {
+        if (v.resolvedType !== 'COLOR') continue;
+        const value = v.valuesByMode[v.defaultModeId];
+        if (!value || typeof value !== 'object' || !('r' in value)) continue;
 
-    // Create collection lookup map
-    const collectionMap = new Map<string, VariableCollection>();
-    for (const collection of collections) {
-      collectionMap.set(collection.id, collection);
-    }
+        const varColor = value as { r: number; g: number; b: number };
+        const matchScore = calculateColorMatchScore(targetRgb, varColor);
 
-    for (const variable of colorVariables) {
-      const collection = collectionMap.get(variable.variableCollectionId);
-      if (!collection) continue;
+        if (matchScore >= 1 - tolerance) {
+          suggestions.push({
+            variableId: v.key, // use key for library variables
+            variableKey: v.key,
+            variableName: v.name,
+            collectionName: v.collectionName,
+            value: rgbToHex(varColor.r, varColor.g, varColor.b),
+            matchScore,
+            type: 'color'
+          });
+        }
+      }
+    } else {
+      // Fall back to local variables
+      const colorVariables = await figma.variables.getLocalVariablesAsync('COLOR');
+      const collections = await figma.variables.getLocalVariableCollectionsAsync();
 
-      // Get the default mode value
-      const modeId = collection.modes[0].modeId;
-      const value = variable.valuesByMode[modeId];
-
-      // Skip if it's an alias or not a direct color value
-      if (!value || typeof value !== 'object' || !('r' in value)) {
-        continue;
+      const collectionMap = new Map<string, VariableCollection>();
+      for (const collection of collections) {
+        collectionMap.set(collection.id, collection);
       }
 
-      const varColor = value as { r: number; g: number; b: number };
+      for (const variable of colorVariables) {
+        const collection = collectionMap.get(variable.variableCollectionId);
+        if (!collection) continue;
 
-      // Calculate color difference
-      const matchScore = calculateColorMatchScore(targetRgb, varColor);
+        const modeId = collection.modes[0].modeId;
+        const value = variable.valuesByMode[modeId];
 
-      if (matchScore >= 1 - tolerance) {
-        suggestions.push({
-          variableId: variable.id,
-          variableName: variable.name,
-          collectionName: collection.name,
-          value: rgbToHex(varColor.r, varColor.g, varColor.b),
-          matchScore,
-          type: 'color'
-        });
+        if (!value || typeof value !== 'object' || !('r' in value)) continue;
+
+        const varColor = value as { r: number; g: number; b: number };
+        const matchScore = calculateColorMatchScore(targetRgb, varColor);
+
+        if (matchScore >= 1 - tolerance) {
+          suggestions.push({
+            variableId: variable.id,
+            variableName: variable.name,
+            collectionName: collection.name,
+            value: rgbToHex(varColor.r, varColor.g, varColor.b),
+            matchScore,
+            type: 'color'
+          });
+        }
       }
     }
 
@@ -536,55 +613,73 @@ export async function findMatchingColorVariable(
 }
 
 /**
- * Find existing variables that match a given pixel value
+ * Find existing variables that match a given pixel value.
  *
  * @param pixelValue - Pixel value to match
  * @param tolerance - Value tolerance in pixels (default 0 for exact match)
+ * @param libraryVariables - Optional pre-fetched library variables. When provided the
+ *   local variable store is skipped entirely and only these are searched.
  * @returns Array of matching token suggestions sorted by match score
  */
 export async function findMatchingSpacingVariable(
   pixelValue: number,
-  tolerance: number = 0
-): Promise<TokenSuggestion[]> {
+  tolerance: number = 0,
+  libraryVariables?: LibraryVariable[]
+): Promise<(TokenSuggestion & { variableKey?: string })[]> {
   try {
-    const suggestions: TokenSuggestion[] = [];
+    const suggestions: (TokenSuggestion & { variableKey?: string })[] = [];
 
-    // Get all number variables
-    const numberVariables = await figma.variables.getLocalVariablesAsync('FLOAT');
-    const collections = await figma.variables.getLocalVariableCollectionsAsync();
+    if (libraryVariables) {
+      for (const v of libraryVariables) {
+        if (v.resolvedType !== 'FLOAT') continue;
+        const value = v.valuesByMode[v.defaultModeId];
+        if (typeof value !== 'number') continue;
 
-    // Create collection lookup map
-    const collectionMap = new Map<string, VariableCollection>();
-    for (const collection of collections) {
-      collectionMap.set(collection.id, collection);
-    }
+        const difference = Math.abs(value - pixelValue);
+        if (difference <= tolerance) {
+          const matchScore = difference === 0 ? 1 : 1 - (difference / (tolerance || 1));
+          suggestions.push({
+            variableId: v.key,
+            variableKey: v.key,
+            variableName: v.name,
+            collectionName: v.collectionName,
+            value: `${value}px`,
+            matchScore,
+            type: 'number'
+          });
+        }
+      }
+    } else {
+      // Fall back to local variables
+      const numberVariables = await figma.variables.getLocalVariablesAsync('FLOAT');
+      const collections = await figma.variables.getLocalVariableCollectionsAsync();
 
-    for (const variable of numberVariables) {
-      const collection = collectionMap.get(variable.variableCollectionId);
-      if (!collection) continue;
-
-      // Get the default mode value
-      const modeId = collection.modes[0].modeId;
-      const value = variable.valuesByMode[modeId];
-
-      // Skip if it's an alias or not a number
-      if (typeof value !== 'number') {
-        continue;
+      const collectionMap = new Map<string, VariableCollection>();
+      for (const collection of collections) {
+        collectionMap.set(collection.id, collection);
       }
 
-      // Calculate value difference
-      const difference = Math.abs(value - pixelValue);
+      for (const variable of numberVariables) {
+        const collection = collectionMap.get(variable.variableCollectionId);
+        if (!collection) continue;
 
-      if (difference <= tolerance) {
-        const matchScore = difference === 0 ? 1 : 1 - (difference / (tolerance || 1));
-        suggestions.push({
-          variableId: variable.id,
-          variableName: variable.name,
-          collectionName: collection.name,
-          value: `${value}px`,
-          matchScore,
-          type: 'number'
-        });
+        const modeId = collection.modes[0].modeId;
+        const value = variable.valuesByMode[modeId];
+
+        if (typeof value !== 'number') continue;
+
+        const difference = Math.abs(value - pixelValue);
+        if (difference <= tolerance) {
+          const matchScore = difference === 0 ? 1 : 1 - (difference / (tolerance || 1));
+          suggestions.push({
+            variableId: variable.id,
+            variableName: variable.name,
+            collectionName: collection.name,
+            value: `${value}px`,
+            matchScore,
+            type: 'number'
+          });
+        }
       }
     }
 
@@ -603,14 +698,16 @@ export async function findMatchingSpacingVariable(
  * @param pixelValue - Pixel value to match
  * @param propertyPath - The property being fixed (e.g., 'strokeWeight', 'cornerRadius', 'paddingTop')
  * @param tolerance - Value tolerance in pixels (default 2)
+ * @param libraryVariables - Optional pre-fetched library variables
  * @returns Array of matching token suggestions re-sorted by boosted scores
  */
 export async function findBestMatchingVariable(
   pixelValue: number,
   propertyPath: string,
-  tolerance: number = 2
-): Promise<TokenSuggestion[]> {
-  const suggestions = await findMatchingSpacingVariable(pixelValue, tolerance);
+  tolerance: number = 2,
+  libraryVariables?: LibraryVariable[]
+): Promise<(TokenSuggestion & { variableKey?: string })[]> {
+  const suggestions = await findMatchingSpacingVariable(pixelValue, tolerance, libraryVariables);
   if (suggestions.length === 0) return suggestions;
 
   // Define affinity keywords per property type
@@ -912,6 +1009,89 @@ export async function previewFix(
     console.error('Error generating fix preview:', error);
     return null;
   }
+}
+
+// ============================================================================
+// Auto-Apply Functions
+// ============================================================================
+
+/**
+ * Silently import and apply all variable suggestions attached to a TokenAnalysis.
+ * Tokens are eligible when they have a suggestedVariableKey set (populated by
+ * matchTokensToVariables in token-analyzer.ts).
+ *
+ * Library variables must be imported before binding – importVariableByKeyAsync
+ * returns a local copy of the variable whose ID can then be used for binding.
+ */
+export async function autoApplyMatches(tokenAnalysis: TokenAnalysis): Promise<AutoApplyResult> {
+  const applied: AutoApplyEntry[] = [];
+  const skipped: AutoApplyEntry[] = [];
+
+  const categories = ['colors', 'spacing', 'borders'] as const;
+
+  for (const category of categories) {
+    const tokens = tokenAnalysis[category];
+    for (const token of tokens) {
+      if (!token.suggestedVariableKey || !token.context?.nodeId || !token.context?.property) {
+        continue;
+      }
+
+      const node = await figma.getNodeByIdAsync(token.context.nodeId) as SceneNode | null;
+      if (!node) {
+        skipped.push({
+          nodeId: token.context.nodeId,
+          nodeName: token.context.nodeName || 'unknown',
+          property: token.context.property,
+          variableName: token.suggestedVariableName || '',
+          value: token.value
+        });
+        continue;
+      }
+
+      try {
+        // Import the library variable to get a local copy
+        const importedVar = await figma.variables.importVariableByKeyAsync(token.suggestedVariableKey);
+
+        let result;
+        if (category === 'colors') {
+          const propertyPath = token.context.property === 'fills' ? 'fills[0]' : 'strokes[0]';
+          result = await applyColorFix(node, propertyPath, importedVar.id);
+        } else {
+          // spacing or borders
+          result = await applySpacingFix(node, token.context.property, importedVar.id);
+        }
+
+        if (result.success) {
+          applied.push({
+            nodeId: node.id,
+            nodeName: node.name,
+            property: token.context.property,
+            variableName: token.suggestedVariableName || importedVar.name,
+            value: token.value
+          });
+        } else {
+          skipped.push({
+            nodeId: node.id,
+            nodeName: node.name,
+            property: token.context.property,
+            variableName: token.suggestedVariableName || '',
+            value: token.value
+          });
+        }
+      } catch (err) {
+        console.warn(`autoApplyMatches: failed to apply ${token.suggestedVariableName} to ${node.name}.${token.context.property}:`, err);
+        skipped.push({
+          nodeId: node.id,
+          nodeName: node.name,
+          property: token.context.property,
+          variableName: token.suggestedVariableName || '',
+          value: token.value
+        });
+      }
+    }
+  }
+
+  return { applied, skipped };
 }
 
 // ============================================================================

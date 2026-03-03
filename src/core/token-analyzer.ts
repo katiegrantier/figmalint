@@ -1,7 +1,13 @@
 /// <reference types="@figma/plugin-typings" />
 
-import { DesignToken, TokenAnalysis, TokenCategory } from '../types';
+import { DesignToken, TokenAnalysis, TokenCategory, LibraryEntry } from '../types';
 import { rgbToHex, getVariableName, getVariableValue, getDebugContext } from '../utils/figma-helpers';
+import {
+  getLibraryVariables,
+  findMatchingColorVariable,
+  findBestMatchingVariable,
+  LibraryVariable,
+} from '../fixes/token-fixer';
 
 /**
  * Check if a node has default variant frame styles
@@ -732,5 +738,125 @@ function getDefaultSuggestion(token: DesignToken, category: TokenCategory): stri
     case 'effects': return 'Use semantic shadow token (e.g., shadow.small, shadow.medium)';
     case 'borders': return 'Use appropriate radius token (e.g., radius.small, radius.medium)';
     default: return 'Create or use existing design token';
+  }
+}
+
+// ============================================================================
+// Library Variable Matching
+// ============================================================================
+
+/**
+ * Match hard-coded tokens in a TokenAnalysis against variables from designated
+ * Figma team libraries. Mutates each eligible token in-place by setting:
+ *   suggestedVariableId, suggestedVariableKey, suggestedVariableName, matchConfidence
+ *
+ * Thresholds:
+ *   - Color: RGB Euclidean tolerance ≤ 10/255 (~4% difference)
+ *   - Spacing / radius / weight: ±2px
+ *   - Confidence gate: matchScore >= 0.8 required to annotate
+ *
+ * Per-library config controls:
+ *   - tokenTypes: which token categories this library applies to
+ *   - variableFilter: comma-separated name prefixes; only matching variables are candidates
+ *
+ * @param analysis - The TokenAnalysis to annotate (mutated in-place)
+ * @param libraries - Per-library config entries
+ */
+export async function matchTokensToVariables(
+  analysis: TokenAnalysis,
+  libraries: LibraryEntry[]
+): Promise<void> {
+  if (!libraries || libraries.length === 0) return;
+
+  // Fetch all variables from all configured libraries in one pass
+  const allLibraryNames = libraries.map(l => l.name);
+  const allVars = await getLibraryVariables(allLibraryNames);
+  if (allVars.length === 0) {
+    console.warn('matchTokensToVariables: no library variables found for', allLibraryNames);
+    return;
+  }
+
+  const colorTolerance = 10 / 255;
+  const spacingTolerance = 2;
+  const CONFIDENCE_GATE = 0.8;
+
+  /**
+   * Return variables from the pre-fetched pool that are allowed for a given token type,
+   * respecting each library entry's tokenTypes scope and variableFilter.
+   */
+  function varsForType(tokenType: 'colors' | 'spacing' | 'borders'): LibraryVariable[] {
+    return allVars.filter(v => {
+      const entry = libraries.find(l => l.name === v.libraryName);
+      if (!entry) return false;
+
+      // Check scope: entry must cover this token type
+      const covers = entry.tokenTypes.includes('all') || entry.tokenTypes.includes(tokenType);
+      if (!covers) return false;
+
+      // Apply variable name prefix filter if specified
+      if (entry.variableFilter) {
+        const prefixes = entry.variableFilter
+          .split(',')
+          .map(s => s.trim().toLowerCase())
+          .filter(s => s.length > 0);
+        if (prefixes.length > 0) {
+          const vLower = v.name.toLowerCase();
+          return prefixes.some(prefix => vLower.startsWith(prefix));
+        }
+      }
+
+      return true;
+    });
+  }
+
+  // Helper to annotate a token
+  function annotate(token: DesignToken, variableId: string, variableKey: string, variableName: string, matchScore: number): void {
+    token.suggestedVariableId = variableId;
+    token.suggestedVariableKey = variableKey;
+    token.suggestedVariableName = variableName;
+    token.matchConfidence = matchScore;
+  }
+
+  // --- Colors ---
+  const colorVars = varsForType('colors');
+  for (const token of analysis.colors) {
+    if (token.source !== 'hard-coded' || token.isDefaultVariantStyle) continue;
+    if (!token.value || !token.value.startsWith('#')) continue;
+
+    const matches = await findMatchingColorVariable(token.value, colorTolerance, colorVars);
+    if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
+      const best = matches[0];
+      annotate(token, best.variableId, best.variableKey || best.variableId, best.variableName, best.matchScore);
+    }
+  }
+
+  // --- Spacing ---
+  const spacingVars = varsForType('spacing');
+  for (const token of analysis.spacing) {
+    if (token.source !== 'hard-coded' || token.isDefaultVariantStyle) continue;
+    const px = parseFloat(token.value);
+    if (isNaN(px)) continue;
+    const property = token.context?.property || 'paddingTop';
+
+    const matches = await findBestMatchingVariable(px, property, spacingTolerance, spacingVars);
+    if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
+      const best = matches[0];
+      annotate(token, best.variableId, best.variableKey || best.variableId, best.variableName, best.matchScore);
+    }
+  }
+
+  // --- Borders (radius + stroke weight) ---
+  const borderVars = varsForType('borders');
+  for (const token of analysis.borders) {
+    if (token.source !== 'hard-coded' || token.isDefaultVariantStyle) continue;
+    const px = parseFloat(token.value);
+    if (isNaN(px)) continue;
+    const property = token.context?.property || 'cornerRadius';
+
+    const matches = await findBestMatchingVariable(px, property, spacingTolerance, borderVars);
+    if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
+      const best = matches[0];
+      annotate(token, best.variableId, best.variableKey || best.variableId, best.variableName, best.matchScore);
+    }
   }
 }

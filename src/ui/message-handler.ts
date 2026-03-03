@@ -3,7 +3,7 @@
 import { PluginMessage, UIMessageType, EnhancedAnalysisOptions, ChatMessage, ChatResponse } from '../types';
 import { sendMessageToUI, isValidNodeForAnalysis } from '../utils/figma-helpers';
 import { processEnhancedAnalysis, processAnalysisResult, extractComponentContext } from '../core/component-analyzer';
-import { extractDesignTokensFromNode } from '../core/token-analyzer';
+import { extractDesignTokensFromNode, matchTokensToVariables } from '../core/token-analyzer';
 import { extractJSONFromResponse, createEnhancedMetadataPrompt, filterDevelopmentRecommendations } from '../api/claude';
 import ComponentConsistencyEngine from '../core/consistency-engine';
 import {
@@ -25,6 +25,7 @@ import {
   findMatchingSpacingVariable,
   findBestMatchingVariable,
   suggestSemanticTokenName,
+  autoApplyMatches,
   FixPreview,
   FixResult,
 } from '../fixes/token-fixer';
@@ -38,7 +39,7 @@ import {
   NamingStrategy,
   RenamePreview,
 } from '../fixes/naming-fixer';
-import { FixRequest, FixPreviewRequest, BatchFixRequest } from '../types';
+import { FixRequest, FixPreviewRequest, BatchFixRequest, LibraryEntry } from '../types';
 
 // Plugin state
 let storedApiKey: string | null = null;
@@ -56,6 +57,8 @@ function isValidApiKeyFormat(apiKey: string, provider: ProviderId = selectedProv
       return trimmed.startsWith('sk-') && trimmed.length >= 20;
     case 'google':
       return trimmed.startsWith('AIza') && trimmed.length >= 35;
+    case 'bedrock':
+      return trimmed.length >= 20;
     default:
       return false;
   }
@@ -98,6 +101,12 @@ export async function handleUIMessage(msg: PluginMessage): Promise<void> {
         break;
       case 'clear-api-key':
         await handleClearApiKey();
+        break;
+      case 'save-library-config':
+        await handleSaveLibraryConfig(data);
+        break;
+      case 'load-library-config':
+        await handleLoadLibraryConfig();
         break;
       case 'chat-message':
         await handleChatMessage(data);
@@ -372,10 +381,27 @@ async function handleEnhancedAnalyze(options: EnhancedAnalysisOptions): Promise<
     lastAnalyzedMetadata = result.metadata;
     lastAnalyzedNode = selectedNode;
 
+    // Auto-apply library variable bindings (silent, no confirmation required)
+    let autoApplyResult = undefined;
+    try {
+      const libraries = await loadLibraryEntries();
+      if (libraries.length > 0 && result.tokens) {
+        figma.notify('Matching library variables...', { timeout: 2000 });
+        await matchTokensToVariables(result.tokens, libraries);
+        autoApplyResult = await autoApplyMatches(result.tokens);
+        if (autoApplyResult.applied.length > 0) {
+          figma.notify(`Auto-applied ${autoApplyResult.applied.length} variable binding${autoApplyResult.applied.length !== 1 ? 's' : ''}`, { timeout: 3000 });
+        }
+      }
+    } catch (autoApplyError) {
+      console.warn('Auto-apply failed (non-fatal):', autoApplyError);
+    }
+
     // Send results to UI, including the analyzed node ID for fix operations
     sendMessageToUI('enhanced-analysis-result', {
       ...result,
-      analyzedNodeId: selectedNode.id
+      analyzedNodeId: selectedNode.id,
+      autoApplyResult
     });
     figma.notify('Enhanced analysis complete! Check the results panel.', { timeout: 3000 });
 
@@ -494,6 +520,59 @@ async function handleClearApiKey(): Promise<void> {
     figma.notify(`${providerName} API key cleared`, { timeout: 2000 });
   } catch (error) {
     console.error('Error clearing API key:', error);
+  }
+}
+
+/**
+ * Load persisted LibraryEntry[] from storage, migrating the old flat-names format if needed.
+ */
+async function loadLibraryEntries(): Promise<LibraryEntry[]> {
+  const raw = await figma.clientStorage.getAsync(STORAGE_KEYS.LIBRARY_CONFIG) as any;
+  if (!raw) return [];
+
+  // New format: { libraries: LibraryEntry[] }
+  if (raw.libraries && Array.isArray(raw.libraries)) {
+    return raw.libraries as LibraryEntry[];
+  }
+
+  // Legacy format: { libraryNames: string[] } — migrate silently
+  if (raw.libraryNames && Array.isArray(raw.libraryNames)) {
+    const migrated: LibraryEntry[] = (raw.libraryNames as string[]).map(name => ({
+      name,
+      tokenTypes: ['all'],
+    }));
+    await figma.clientStorage.setAsync(STORAGE_KEYS.LIBRARY_CONFIG, { libraries: migrated });
+    return migrated;
+  }
+
+  return [];
+}
+
+/**
+ * Save library config to Figma client storage
+ */
+async function handleSaveLibraryConfig(data: { libraries: LibraryEntry[] }): Promise<void> {
+  try {
+    const config = { libraries: data.libraries || [] };
+    await figma.clientStorage.setAsync(STORAGE_KEYS.LIBRARY_CONFIG, config);
+    sendMessageToUI('library-config-saved', { success: true, libraries: config.libraries });
+    figma.notify('Library config saved', { timeout: 2000 });
+  } catch (error) {
+    console.error('Error saving library config:', error);
+    sendMessageToUI('library-config-saved', { success: false, error: String(error) });
+  }
+}
+
+/**
+ * Load library config from Figma client storage
+ */
+async function handleLoadLibraryConfig(): Promise<void> {
+  try {
+    const libraries = await loadLibraryEntries();
+    sendMessageToUI('library-config-loaded', { libraries });
+  } catch (error) {
+    console.error('Error loading library config:', error);
+    sendMessageToUI('library-config-loaded', { libraries: [] });
   }
 }
 

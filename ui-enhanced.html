@@ -2,9 +2,9 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>FigmaLint</title>
+  <title>PrimeCXLint</title>
   <style>
-    /* Carbon-Inspired Design System for FigmaLint */
+    /* Carbon-Inspired Design System for PrimeCXLint */
     :root {
       /* Carbon-inspired color tokens */
       --background: #f4f4f4;
@@ -2256,7 +2256,7 @@
     <div class="header">
       <div class="plugin-title">
         <div class="plugin-icon">FL</div>
-        <h1 class="plugin-name">FigmaLint</h1>
+        <h1 class="plugin-name">PrimeCXLint</h1>
       </div>
     </div>
 
@@ -2346,12 +2346,39 @@
                 </optgroup>
                 <!-- Amazon Bedrock Models -->
                 <optgroup label="Amazon Bedrock" id="bedrock-models" style="display: none;">
-                  <option value="anthropic.claude-3-opus-20240229" disabled>Claude 3 Opus (Flagship)</option>
-                  <option value="anthropic.claude-3-5-sonnet-20241022" disabled>Claude 3.5 Sonnet (Recommended)</option>
-                  <option value="anthropic.claude-3-5-haiku-20241022" disabled>Claude 3.5 Haiku (Fast - Economy)</option>
+                  <option value="us.anthropic.claude-3-7-sonnet-20250219-v1:0" disabled>Claude 3.7 Sonnet (Flagship)</option>
+                  <option value="us.anthropic.claude-sonnet-4-5-20250929-v1:0" disabled>Claude Sonnet 4.5 (Recommended)</option>
+                  <option value="us.anthropic.claude-3-5-haiku-20241022-v1:0" disabled>Claude 3.5 Haiku (Fast - Economy)</option>
                 </optgroup>
               </select>
               <p class="card-subtitle">Choose the model that works best for your component analysis</p>
+            </div>
+
+            <!-- Design System Libraries -->
+            <div class="form-group" id="library-config-section">
+              <label>Design System Libraries</label>
+              <p class="card-subtitle" style="margin-bottom: 6px;">Per-library scope &amp; variable filter for auto-binding</p>
+
+              <!-- Library entry cards -->
+              <div id="library-entries-list" style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;"></div>
+
+              <!-- Add library row -->
+              <div style="display: flex; gap: 6px; align-items: center;">
+                <input
+                  type="text"
+                  id="new-library-name"
+                  placeholder="Library name (exact)"
+                  autocomplete="off"
+                  style="flex: 1; font-size: var(--font-size-sm); padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); color: var(--text-primary);"
+                >
+                <button id="add-library-entry" class="button button-ghost" style="padding: 5px 10px; font-size: 11px; white-space: nowrap;">+ Add</button>
+              </div>
+
+              <div style="display: flex; justify-content: flex-end; margin-top: 8px;">
+                <button id="save-library-config" class="button button-secondary" style="font-size: 11px; padding: 5px 12px;">
+                  <span>Save Libraries</span>
+                </button>
+              </div>
             </div>
 
             <div class="button-group mt-md">
@@ -2386,6 +2413,25 @@
 
         <!-- Analysis Results -->
         <div id="analysis-results" class="hidden">
+
+          <!-- Auto-Apply Summary Banner -->
+          <div id="auto-apply-banner" class="hidden" style="margin-bottom: 8px;">
+            <div class="collapsible">
+              <div class="collapsible-header" onclick="toggleCollapsible(this)" style="background: var(--success-bg); border-color: var(--success);">
+                <div class="collapsible-title">
+                  <span class="collapsible-icon">▶</span>
+                  <span id="auto-apply-title" style="color: var(--success-text); font-weight: var(--font-weight-semibold);">✓ Auto-applied 0 variable bindings</span>
+                </div>
+              </div>
+              <div class="collapsible-content">
+                <div id="auto-apply-applied-list" style="padding: var(--spacing-03) 0;"></div>
+                <div id="auto-apply-skipped-section" class="hidden" style="margin-top: 4px;">
+                  <p id="auto-apply-skipped-label" style="font-size: var(--font-size-sm); color: var(--text-secondary); margin: 0 0 4px 0;"></p>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- Audit View -->
           <div class="collapsible">
             <div class="collapsible-header active" onclick="toggleCollapsible(this)">
@@ -2782,7 +2828,7 @@
         name: 'Bedrock',
         placeholder: 'Your API Gateway key...',
         hint: 'Enter the API Gateway key from your AWS Bedrock proxy setup',
-        defaultModel: 'anthropic.claude-3-5-sonnet-20241022'
+        defaultModel: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'
       }
     };
 
@@ -3291,11 +3337,15 @@
         chatInput.addEventListener('input', handleChatInputChange);
       }
 
+      // Library config
+      initLibraryConfig();
+
       // Listen for messages from plugin
       window.addEventListener('message', handlePluginMessage);
 
-      // Request current API key status
+      // Request current API key status and library config
       sendMessageToPlugin('check-api-key', {});
+      sendMessageToPlugin('load-library-config', {});
     }
 
     // Handle Export Metadata
@@ -3588,7 +3638,7 @@
 
       // --- Footer ---
       content += `---\n\n`;
-      content += `*Generated by FigmaLint — ${new Date().toLocaleDateString()}*\n`;
+      content += `*Generated by PrimeCXLint — ${new Date().toLocaleDateString()}*\n`;
 
       return content;
     }
@@ -3767,7 +3817,7 @@
       }
 
       prompt += `\n---\n\n`;
-      prompt += `*Generated by FigmaLint — ${new Date().toLocaleDateString()}*\n`;
+      prompt += `*Generated by PrimeCXLint — ${new Date().toLocaleDateString()}*\n`;
 
       return prompt;
     }
@@ -4177,6 +4227,18 @@
         case 'description-updated':
           handleDescriptionUpdated(data);
           break;
+        case 'library-config-saved':
+          if (data.success) {
+            updateStatus('Library config saved!', 'success');
+          } else {
+            updateStatus('Failed to save library config', 'error');
+          }
+          break;
+        case 'library-config-loaded':
+          if (data.libraries && Array.isArray(data.libraries)) {
+            loadLibraryEntries(data.libraries);
+          }
+          break;
         default:
           console.log('Unknown message type:', type);
       }
@@ -4410,7 +4472,194 @@
       // Update chat component context if we're on chat tab or switching to it
       updateChatComponentContext();
 
+      // Render auto-apply summary banner
+      renderAutoApplyBanner(data.autoApplyResult);
+
       updateStatus('Analysis complete!', 'success');
+    }
+
+    // Render auto-apply summary banner
+    function renderAutoApplyBanner(autoApplyResult) {
+      const banner = document.getElementById('auto-apply-banner');
+      const titleEl = document.getElementById('auto-apply-title');
+      const appliedList = document.getElementById('auto-apply-applied-list');
+      const skippedSection = document.getElementById('auto-apply-skipped-section');
+      const skippedLabel = document.getElementById('auto-apply-skipped-label');
+
+      if (!banner || !titleEl || !appliedList) return;
+
+      if (!autoApplyResult || (autoApplyResult.applied.length === 0 && autoApplyResult.skipped.length === 0)) {
+        banner.classList.add('hidden');
+        return;
+      }
+
+      banner.classList.remove('hidden');
+
+      const count = autoApplyResult.applied.length;
+      titleEl.textContent = `✓ Auto-applied ${count} variable binding${count !== 1 ? 's' : ''}`;
+
+      // Render applied entries
+      if (autoApplyResult.applied.length > 0) {
+        appliedList.innerHTML = autoApplyResult.applied.map(entry =>
+          `<div style="font-size: var(--font-size-sm); padding: 2px 0; display: flex; gap: 6px; align-items: baseline;">
+            <span style="color: var(--success); font-weight: var(--font-weight-medium); flex-shrink: 0;">✓</span>
+            <span style="color: var(--text-primary);"><strong>${escapeHtml(entry.nodeName)}</strong></span>
+            <span style="color: var(--text-secondary);">→ ${escapeHtml(entry.property)}</span>
+            <span style="color: var(--interactive);">${escapeHtml(entry.variableName)}</span>
+          </div>`
+        ).join('');
+      } else {
+        appliedList.innerHTML = '<p style="font-size: var(--font-size-sm); color: var(--text-secondary); margin: 0;">No bindings applied.</p>';
+      }
+
+      // Show skipped count if any
+      if (autoApplyResult.skipped && autoApplyResult.skipped.length > 0 && skippedSection && skippedLabel) {
+        skippedSection.classList.remove('hidden');
+        skippedLabel.textContent = `${autoApplyResult.skipped.length} value${autoApplyResult.skipped.length !== 1 ? 's' : ''} could not be matched — use Fix buttons below`;
+      } else if (skippedSection) {
+        skippedSection.classList.add('hidden');
+      }
+    }
+
+    // =========================================================================
+    // Library Config UI
+    // =========================================================================
+
+    // In-memory library entries list
+    let libraryEntriesData = [];
+
+    function initLibraryConfig() {
+      const addBtn = document.getElementById('add-library-entry');
+      const saveBtn = document.getElementById('save-library-config');
+      const nameInput = document.getElementById('new-library-name');
+
+      if (addBtn) {
+        addBtn.addEventListener('click', () => {
+          const name = nameInput ? nameInput.value.trim() : '';
+          if (!name) return;
+          // Prevent duplicates
+          if (libraryEntriesData.some(e => e.name === name)) {
+            updateStatus('Library already added', 'warning');
+            return;
+          }
+          libraryEntriesData.push({ name, tokenTypes: ['all'], variableFilter: '' });
+          if (nameInput) nameInput.value = '';
+          renderLibraryEntries();
+        });
+      }
+
+      if (nameInput) {
+        nameInput.addEventListener('keypress', e => {
+          if (e.key === 'Enter') addBtn && addBtn.click();
+        });
+      }
+
+      if (saveBtn) {
+        saveBtn.addEventListener('click', () => {
+          // Collect current state from the rendered cards before saving
+          syncLibraryEntriesFromDOM();
+          sendMessageToPlugin('save-library-config', { libraries: libraryEntriesData });
+        });
+      }
+    }
+
+    /** Pull latest values out of the rendered DOM cards into libraryEntriesData */
+    function syncLibraryEntriesFromDOM() {
+      const list = document.getElementById('library-entries-list');
+      if (!list) return;
+      list.querySelectorAll('.lib-entry-card').forEach((card, i) => {
+        if (!libraryEntriesData[i]) return;
+        // Sync variable filter text
+        const filterInput = card.querySelector('.lib-filter-input');
+        if (filterInput) libraryEntriesData[i].variableFilter = filterInput.value.trim();
+        // Sync token type checkboxes
+        const types = [];
+        card.querySelectorAll('.lib-type-checkbox:checked').forEach(cb => types.push(cb.value));
+        libraryEntriesData[i].tokenTypes = types.length > 0 ? types : ['all'];
+      });
+    }
+
+    /** Load entries returned from the plugin */
+    function loadLibraryEntries(entries) {
+      libraryEntriesData = (entries || []).map(e => ({
+        name: e.name,
+        tokenTypes: e.tokenTypes || ['all'],
+        variableFilter: e.variableFilter || '',
+      }));
+      renderLibraryEntries();
+    }
+
+    function renderLibraryEntries() {
+      const list = document.getElementById('library-entries-list');
+      if (!list) return;
+
+      if (libraryEntriesData.length === 0) {
+        list.innerHTML = '<p style="font-size: var(--font-size-sm); color: var(--text-tertiary); margin: 0;">No libraries added yet.</p>';
+        return;
+      }
+
+      list.innerHTML = libraryEntriesData.map((entry, idx) => {
+        const allChecked = entry.tokenTypes.includes('all');
+        const colorChecked = allChecked || entry.tokenTypes.includes('colors');
+        const spacingChecked = allChecked || entry.tokenTypes.includes('spacing');
+        const bordersChecked = allChecked || entry.tokenTypes.includes('borders');
+        return `
+        <div class="lib-entry-card" data-idx="${idx}" style="
+          background: var(--surface-alt);
+          border: 1px solid var(--border);
+          border-radius: var(--radius-md);
+          padding: 8px 10px;
+          font-size: var(--font-size-sm);
+        ">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <strong style="color: var(--text-primary); font-size: var(--font-size-sm);">${escapeHtml(entry.name)}</strong>
+            <button class="lib-remove-btn" data-idx="${idx}" style="
+              background: none; border: none; cursor: pointer;
+              color: var(--text-tertiary); font-size: 14px; line-height: 1; padding: 0 2px;
+            " title="Remove library">×</button>
+          </div>
+
+          <div style="margin-bottom: 6px;">
+            <span style="color: var(--text-secondary); font-size: 11px;">Applies to:</span>
+            <div style="display: flex; gap: 10px; margin-top: 3px; flex-wrap: wrap;">
+              <label style="display: flex; align-items: center; gap: 3px; font-size: 11px; cursor: pointer;">
+                <input type="checkbox" class="lib-type-checkbox" value="colors" ${colorChecked ? 'checked' : ''}> Colors
+              </label>
+              <label style="display: flex; align-items: center; gap: 3px; font-size: 11px; cursor: pointer;">
+                <input type="checkbox" class="lib-type-checkbox" value="spacing" ${spacingChecked ? 'checked' : ''}> Spacing
+              </label>
+              <label style="display: flex; align-items: center; gap: 3px; font-size: 11px; cursor: pointer;">
+                <input type="checkbox" class="lib-type-checkbox" value="borders" ${bordersChecked ? 'checked' : ''}> Borders
+              </label>
+            </div>
+          </div>
+
+          <div>
+            <span style="color: var(--text-secondary); font-size: 11px;">Variable filter (prefixes):</span>
+            <input
+              type="text"
+              class="lib-filter-input"
+              placeholder="e.g. color/brand, color/semantic  (empty = all)"
+              value="${escapeHtml(entry.variableFilter || '')}"
+              style="
+                width: 100%; margin-top: 3px; font-size: 11px;
+                padding: 4px 6px; border: 1px solid var(--border);
+                border-radius: var(--radius-md); background: var(--surface);
+                color: var(--text-primary); box-sizing: border-box;
+              "
+            >
+          </div>
+        </div>`;
+      }).join('');
+
+      // Attach remove-button listeners
+      list.querySelectorAll('.lib-remove-btn').forEach(btn => {
+        btn.addEventListener('click', e => {
+          const idx = parseInt(e.currentTarget.dataset.idx, 10);
+          libraryEntriesData.splice(idx, 1);
+          renderLibraryEntries();
+        });
+      });
     }
 
     // Update Audit View
@@ -5810,6 +6059,9 @@
       propertyCheatsheet.innerHTML = '<div class="skeleton"></div><div class="skeleton" style="width: 70%;"></div>';
       tokenSuggestions.innerHTML = '<div class="skeleton"></div><div class="skeleton" style="width: 90%;"></div>';
       metadataContent.innerHTML = '<div class="skeleton"></div><div class="skeleton" style="width: 85%;"></div>';
+      // Reset auto-apply banner on new analysis
+      const banner = document.getElementById('auto-apply-banner');
+      if (banner) banner.classList.add('hidden');
     }
 
     // Update UI Button States

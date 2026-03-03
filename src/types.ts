@@ -77,6 +77,11 @@ export interface DesignToken {
   suggestion?: string;
   strokeColor?: string;
   isDefaultVariantStyle?: boolean;
+  // Library variable match fields (populated by matchTokensToVariables)
+  suggestedVariableId?: string;
+  suggestedVariableKey?: string;
+  suggestedVariableName?: string;
+  matchConfidence?: number; // 0-1
   context?: {
     nodeType?: string;
     nodeName?: string;
@@ -86,6 +91,40 @@ export interface DesignToken {
     description?: string;
     property?: string;
   };
+}
+
+export interface LibraryEntry {
+  /** Exact library name as it appears in Figma Assets panel */
+  name: string;
+  /**
+   * Which token types this library should be matched against.
+   * 'all' matches colors, spacing, and borders.
+   */
+  tokenTypes: Array<'colors' | 'spacing' | 'borders' | 'all'>;
+  /**
+   * Optional comma-separated variable name prefixes.
+   * When set, only variables whose names start with one of these prefixes are used.
+   * Empty / omitted = all variables in the library are eligible.
+   * Example: "color/brand, color/semantic"
+   */
+  variableFilter?: string;
+}
+
+export interface LibraryConfig {
+  libraries: LibraryEntry[];
+}
+
+export interface AutoApplyEntry {
+  nodeId: string;
+  nodeName: string;
+  property: string;
+  variableName: string;
+  value: string;
+}
+
+export interface AutoApplyResult {
+  applied: AutoApplyEntry[];
+  skipped: AutoApplyEntry[];
 }
 
 export interface TokenAnalysis {
@@ -190,6 +229,9 @@ export type UIMessageType =
   | 'chat-message'
   | 'chat-clear-history'
   | 'select-node'
+  // Library config message types
+  | 'save-library-config'
+  | 'load-library-config'
   // Auto-fix message types
   | 'preview-fix'
   | 'apply-token-fix'
@@ -252,6 +294,7 @@ export interface EnhancedAnalysisResult {
   recommendations?: Array<{ name: string; type: string; description: string; examples: string[] }>;
   namingIssues?: NamingIssue[];
   existingDescription?: string;
+  autoApplyResult?: AutoApplyResult;
 }
 
 // Re-export NamingIssue shape for use in UI messages

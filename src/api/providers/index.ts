@@ -273,6 +273,9 @@ export const STORAGE_KEYS = {
   /** Legacy Claude key (for migration) */
   LEGACY_CLAUDE_KEY: 'claude-api-key',
   LEGACY_CLAUDE_MODEL: 'claude-model',
+
+  /** Designated library names for auto-apply variable matching */
+  LIBRARY_CONFIG: 'library-config',
 };
 
 /**
