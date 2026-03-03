@@ -4,8 +4,8 @@ import { DesignToken, TokenAnalysis, TokenCategory, LibraryEntry } from '../type
 import { rgbToHex, getVariableName, getVariableValue, getDebugContext } from '../utils/figma-helpers';
 import {
   getLibraryVariables,
-  findMatchingColorVariable,
-  findBestMatchingVariable,
+  importAndMatchColors,
+  importAndMatchFloats,
   LibraryVariable,
 } from '../fixes/token-fixer';
 
@@ -818,15 +818,18 @@ export async function matchTokensToVariables(
   }
 
   // --- Colors ---
+  // importAndMatchColors imports stubs in parallel, then reads valuesByMode from
+  // the local copies to compare. This is the only correct way to get library variable
+  // values — LibraryVariable stubs from the team library API have no valuesByMode.
   const colorVars = varsForType('colors');
   for (const token of analysis.colors) {
     if (token.source !== 'hard-coded' || token.isDefaultVariantStyle) continue;
     if (!token.value || !token.value.startsWith('#')) continue;
 
-    const matches = await findMatchingColorVariable(token.value, colorTolerance, colorVars);
+    const matches = await importAndMatchColors(token.value, colorVars, colorTolerance);
     if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
       const best = matches[0];
-      annotate(token, best.variableId, best.variableKey || best.variableId, best.variableName, best.matchScore);
+      annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
     }
   }
 
@@ -838,10 +841,10 @@ export async function matchTokensToVariables(
     if (isNaN(px)) continue;
     const property = token.context?.property || 'paddingTop';
 
-    const matches = await findBestMatchingVariable(px, property, spacingTolerance, spacingVars);
+    const matches = await importAndMatchFloats(px, property, spacingVars, spacingTolerance);
     if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
       const best = matches[0];
-      annotate(token, best.variableId, best.variableKey || best.variableId, best.variableName, best.matchScore);
+      annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
     }
   }
 
@@ -853,10 +856,10 @@ export async function matchTokensToVariables(
     if (isNaN(px)) continue;
     const property = token.context?.property || 'cornerRadius';
 
-    const matches = await findBestMatchingVariable(px, property, spacingTolerance, borderVars);
+    const matches = await importAndMatchFloats(px, property, borderVars, spacingTolerance);
     if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
       const best = matches[0];
-      annotate(token, best.variableId, best.variableKey || best.variableId, best.variableName, best.matchScore);
+      annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
     }
   }
 }

@@ -148,8 +148,6 @@
               key: v.key,
               name: v.name,
               resolvedType: v.resolvedType,
-              valuesByMode: v.valuesByMode,
-              defaultModeId: collection.defaultModeId,
               collectionName: collection.name,
               libraryName: collection.libraryName
             });
@@ -163,6 +161,92 @@
       console.warn("getLibraryVariables failed:", err);
       return [];
     }
+  }
+  async function importAndMatchColors(hexColor, stubs, tolerance) {
+    const targetRgb = hexToRgb(hexColor);
+    if (!targetRgb) return [];
+    const colorStubs = stubs.filter((s) => s.resolvedType === "COLOR");
+    if (colorStubs.length === 0) return [];
+    const imported = await Promise.allSettled(
+      colorStubs.map((s) => figma.variables.importVariableByKeyAsync(s.key))
+    );
+    const suggestions = [];
+    for (let i = 0; i < imported.length; i++) {
+      const result = imported[i];
+      if (result.status !== "fulfilled") continue;
+      const variable = result.value;
+      const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
+      if (!collection) continue;
+      const modeId = collection.modes[0].modeId;
+      const value = variable.valuesByMode[modeId];
+      if (!value || typeof value !== "object" || !("r" in value)) continue;
+      const varColor = value;
+      const matchScore = calculateColorMatchScore(targetRgb, varColor);
+      if (matchScore >= 1 - tolerance) {
+        suggestions.push({
+          variableId: variable.id,
+          variableKey: colorStubs[i].key,
+          variableName: variable.name,
+          collectionName: collection.name,
+          value: rgbToHex(varColor.r, varColor.g, varColor.b),
+          matchScore,
+          type: "color"
+        });
+      }
+    }
+    return suggestions.sort((a, b) => b.matchScore - a.matchScore);
+  }
+  async function importAndMatchFloats(pixelValue, propertyPath, stubs, tolerance) {
+    const floatStubs = stubs.filter((s) => s.resolvedType === "FLOAT");
+    if (floatStubs.length === 0) return [];
+    const imported = await Promise.allSettled(
+      floatStubs.map((s) => figma.variables.importVariableByKeyAsync(s.key))
+    );
+    const affinityMap = {
+      strokeWeight: ["stroke", "border-width", "border/width", "borderwidth"],
+      cornerRadius: ["radius", "corner", "round", "border-radius"],
+      topLeftRadius: ["radius", "corner", "round"],
+      topRightRadius: ["radius", "corner", "round"],
+      bottomLeftRadius: ["radius", "corner", "round"],
+      bottomRightRadius: ["radius", "corner", "round"],
+      paddingTop: ["padding", "spacing", "space"],
+      paddingRight: ["padding", "spacing", "space"],
+      paddingBottom: ["padding", "spacing", "space"],
+      paddingLeft: ["padding", "spacing", "space"],
+      itemSpacing: ["gap", "spacing", "space"],
+      counterAxisSpacing: ["gap", "spacing", "space"]
+    };
+    const keywords = affinityMap[propertyPath] || [];
+    const suggestions = [];
+    for (let i = 0; i < imported.length; i++) {
+      const result = imported[i];
+      if (result.status !== "fulfilled") continue;
+      const variable = result.value;
+      const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
+      if (!collection) continue;
+      const modeId = collection.modes[0].modeId;
+      const value = variable.valuesByMode[modeId];
+      if (typeof value !== "number") continue;
+      const difference = Math.abs(value - pixelValue);
+      if (difference > tolerance) continue;
+      let matchScore = difference === 0 ? 1 : 1 - difference / (tolerance || 1);
+      if (keywords.length > 0) {
+        const nameLower = variable.name.toLowerCase();
+        if (keywords.some((kw) => nameLower.includes(kw))) {
+          matchScore = Math.min(matchScore + 0.3, 1);
+        }
+      }
+      suggestions.push({
+        variableId: variable.id,
+        variableKey: floatStubs[i].key,
+        variableName: variable.name,
+        collectionName: collection.name,
+        value: `${value}px`,
+        matchScore,
+        type: "number"
+      });
+    }
+    return suggestions.sort((a, b) => b.matchScore - a.matchScore);
   }
   async function bindColorToken(node, propertyType, variableId, paintIndex = 0) {
     try {
@@ -287,58 +371,34 @@
       };
     }
   }
-  async function findMatchingColorVariable(hexColor, tolerance = 0, libraryVariables) {
+  async function findMatchingColorVariable(hexColor, tolerance = 0) {
     try {
       const targetRgb = hexToRgb(hexColor);
-      if (!targetRgb) {
-        return [];
-      }
+      if (!targetRgb) return [];
       const suggestions = [];
-      if (libraryVariables) {
-        for (const v of libraryVariables) {
-          if (v.resolvedType !== "COLOR") continue;
-          const value = v.valuesByMode[v.defaultModeId];
-          if (!value || typeof value !== "object" || !("r" in value)) continue;
-          const varColor = value;
-          const matchScore = calculateColorMatchScore(targetRgb, varColor);
-          if (matchScore >= 1 - tolerance) {
-            suggestions.push({
-              variableId: v.key,
-              // use key for library variables
-              variableKey: v.key,
-              variableName: v.name,
-              collectionName: v.collectionName,
-              value: rgbToHex(varColor.r, varColor.g, varColor.b),
-              matchScore,
-              type: "color"
-            });
-          }
-        }
-      } else {
-        const colorVariables = await figma.variables.getLocalVariablesAsync("COLOR");
-        const collections = await figma.variables.getLocalVariableCollectionsAsync();
-        const collectionMap = /* @__PURE__ */ new Map();
-        for (const collection of collections) {
-          collectionMap.set(collection.id, collection);
-        }
-        for (const variable of colorVariables) {
-          const collection = collectionMap.get(variable.variableCollectionId);
-          if (!collection) continue;
-          const modeId = collection.modes[0].modeId;
-          const value = variable.valuesByMode[modeId];
-          if (!value || typeof value !== "object" || !("r" in value)) continue;
-          const varColor = value;
-          const matchScore = calculateColorMatchScore(targetRgb, varColor);
-          if (matchScore >= 1 - tolerance) {
-            suggestions.push({
-              variableId: variable.id,
-              variableName: variable.name,
-              collectionName: collection.name,
-              value: rgbToHex(varColor.r, varColor.g, varColor.b),
-              matchScore,
-              type: "color"
-            });
-          }
+      const colorVariables = await figma.variables.getLocalVariablesAsync("COLOR");
+      const collections = await figma.variables.getLocalVariableCollectionsAsync();
+      const collectionMap = /* @__PURE__ */ new Map();
+      for (const collection of collections) {
+        collectionMap.set(collection.id, collection);
+      }
+      for (const variable of colorVariables) {
+        const collection = collectionMap.get(variable.variableCollectionId);
+        if (!collection) continue;
+        const modeId = collection.modes[0].modeId;
+        const value = variable.valuesByMode[modeId];
+        if (!value || typeof value !== "object" || !("r" in value)) continue;
+        const varColor = value;
+        const matchScore = calculateColorMatchScore(targetRgb, varColor);
+        if (matchScore >= 1 - tolerance) {
+          suggestions.push({
+            variableId: variable.id,
+            variableName: variable.name,
+            collectionName: collection.name,
+            value: rgbToHex(varColor.r, varColor.g, varColor.b),
+            matchScore,
+            type: "color"
+          });
         }
       }
       return suggestions.sort((a, b) => b.matchScore - a.matchScore);
@@ -347,53 +407,32 @@
       return [];
     }
   }
-  async function findMatchingSpacingVariable(pixelValue, tolerance = 0, libraryVariables) {
+  async function findMatchingSpacingVariable(pixelValue, tolerance = 0) {
     try {
       const suggestions = [];
-      if (libraryVariables) {
-        for (const v of libraryVariables) {
-          if (v.resolvedType !== "FLOAT") continue;
-          const value = v.valuesByMode[v.defaultModeId];
-          if (typeof value !== "number") continue;
-          const difference = Math.abs(value - pixelValue);
-          if (difference <= tolerance) {
-            const matchScore = difference === 0 ? 1 : 1 - difference / (tolerance || 1);
-            suggestions.push({
-              variableId: v.key,
-              variableKey: v.key,
-              variableName: v.name,
-              collectionName: v.collectionName,
-              value: `${value}px`,
-              matchScore,
-              type: "number"
-            });
-          }
-        }
-      } else {
-        const numberVariables = await figma.variables.getLocalVariablesAsync("FLOAT");
-        const collections = await figma.variables.getLocalVariableCollectionsAsync();
-        const collectionMap = /* @__PURE__ */ new Map();
-        for (const collection of collections) {
-          collectionMap.set(collection.id, collection);
-        }
-        for (const variable of numberVariables) {
-          const collection = collectionMap.get(variable.variableCollectionId);
-          if (!collection) continue;
-          const modeId = collection.modes[0].modeId;
-          const value = variable.valuesByMode[modeId];
-          if (typeof value !== "number") continue;
-          const difference = Math.abs(value - pixelValue);
-          if (difference <= tolerance) {
-            const matchScore = difference === 0 ? 1 : 1 - difference / (tolerance || 1);
-            suggestions.push({
-              variableId: variable.id,
-              variableName: variable.name,
-              collectionName: collection.name,
-              value: `${value}px`,
-              matchScore,
-              type: "number"
-            });
-          }
+      const numberVariables = await figma.variables.getLocalVariablesAsync("FLOAT");
+      const collections = await figma.variables.getLocalVariableCollectionsAsync();
+      const collectionMap = /* @__PURE__ */ new Map();
+      for (const collection of collections) {
+        collectionMap.set(collection.id, collection);
+      }
+      for (const variable of numberVariables) {
+        const collection = collectionMap.get(variable.variableCollectionId);
+        if (!collection) continue;
+        const modeId = collection.modes[0].modeId;
+        const value = variable.valuesByMode[modeId];
+        if (typeof value !== "number") continue;
+        const difference = Math.abs(value - pixelValue);
+        if (difference <= tolerance) {
+          const matchScore = difference === 0 ? 1 : 1 - difference / (tolerance || 1);
+          suggestions.push({
+            variableId: variable.id,
+            variableName: variable.name,
+            collectionName: collection.name,
+            value: `${value}px`,
+            matchScore,
+            type: "number"
+          });
         }
       }
       return suggestions.sort((a, b) => b.matchScore - a.matchScore);
@@ -402,8 +441,8 @@
       return [];
     }
   }
-  async function findBestMatchingVariable(pixelValue, propertyPath, tolerance = 2, libraryVariables) {
-    const suggestions = await findMatchingSpacingVariable(pixelValue, tolerance, libraryVariables);
+  async function findBestMatchingVariable(pixelValue, propertyPath, tolerance = 2) {
+    const suggestions = await findMatchingSpacingVariable(pixelValue, tolerance);
     if (suggestions.length === 0) return suggestions;
     const affinityMap = {
       strokeWeight: ["stroke", "border-width", "border/width", "borderwidth"],
@@ -1265,10 +1304,10 @@
     for (const token of analysis.colors) {
       if (token.source !== "hard-coded" || token.isDefaultVariantStyle) continue;
       if (!token.value || !token.value.startsWith("#")) continue;
-      const matches = await findMatchingColorVariable(token.value, colorTolerance, colorVars);
+      const matches = await importAndMatchColors(token.value, colorVars, colorTolerance);
       if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
         const best = matches[0];
-        annotate(token, best.variableId, best.variableKey || best.variableId, best.variableName, best.matchScore);
+        annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
       }
     }
     const spacingVars = varsForType("spacing");
@@ -1277,10 +1316,10 @@
       const px = parseFloat(token.value);
       if (isNaN(px)) continue;
       const property = ((_a = token.context) == null ? void 0 : _a.property) || "paddingTop";
-      const matches = await findBestMatchingVariable(px, property, spacingTolerance, spacingVars);
+      const matches = await importAndMatchFloats(px, property, spacingVars, spacingTolerance);
       if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
         const best = matches[0];
-        annotate(token, best.variableId, best.variableKey || best.variableId, best.variableName, best.matchScore);
+        annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
       }
     }
     const borderVars = varsForType("borders");
@@ -1289,10 +1328,10 @@
       const px = parseFloat(token.value);
       if (isNaN(px)) continue;
       const property = ((_b = token.context) == null ? void 0 : _b.property) || "cornerRadius";
-      const matches = await findBestMatchingVariable(px, property, spacingTolerance, borderVars);
+      const matches = await importAndMatchFloats(px, property, borderVars, spacingTolerance);
       if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
         const best = matches[0];
-        annotate(token, best.variableId, best.variableKey || best.variableId, best.variableName, best.matchScore);
+        annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
       }
     }
   }
