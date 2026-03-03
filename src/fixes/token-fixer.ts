@@ -152,14 +152,46 @@ export async function getLibraryVariables(libraryNames: string[]): Promise<Libra
 }
 
 /**
+ * Import all given stubs in sequential batches, returning a key→Variable cache.
+ * Batching prevents flooding the Figma API with hundreds of simultaneous requests,
+ * which would otherwise push total analysis time over API Gateway timeout limits
+ * when stacked on top of an LLM (Bedrock) API call.
+ *
+ * Imports are idempotent — already-local variables are returned instantly by Figma.
+ */
+export async function importStubsBatched(
+  stubs: LibraryVariable[],
+  batchSize = 20
+): Promise<Map<string, Variable>> {
+  const cache = new Map<string, Variable>();
+  for (let i = 0; i < stubs.length; i += batchSize) {
+    const batch = stubs.slice(i, i + batchSize);
+    const results = await Promise.allSettled(
+      batch.map(s => figma.variables.importVariableByKeyAsync(s.key))
+    );
+    for (let j = 0; j < results.length; j++) {
+      const r = results[j];
+      if (r.status === 'fulfilled') {
+        cache.set(batch[j].key, r.value);
+      }
+    }
+  }
+  return cache;
+}
+
+/**
  * Import COLOR library variable stubs, compare against a target hex color, and
  * return sorted match suggestions. Imports are idempotent — if a variable is
  * already local it's just returned instantly.
+ *
+ * Pass a `preImported` cache (from importStubsBatched) to skip re-importing stubs
+ * that were already imported for another token in the same analysis pass.
  */
 export async function importAndMatchColors(
   hexColor: string,
   stubs: LibraryVariable[],
-  tolerance: number
+  tolerance: number,
+  preImported?: Map<string, Variable>
 ): Promise<(TokenSuggestion & { variableKey: string })[]> {
   const targetRgb = hexToRgb(hexColor);
   if (!targetRgb) return [];
@@ -167,18 +199,31 @@ export async function importAndMatchColors(
   const colorStubs = stubs.filter(s => s.resolvedType === 'COLOR');
   if (colorStubs.length === 0) return [];
 
-  // Import all stubs in parallel (idempotent)
-  const imported = await Promise.allSettled(
-    colorStubs.map(s => figma.variables.importVariableByKeyAsync(s.key))
-  );
+  // Build a key→Variable map — use pre-built cache when available to avoid
+  // redundant imports (N tokens × M stubs = N×M import calls without caching)
+  const varMap = new Map<string, Variable>();
+  if (preImported) {
+    for (const stub of colorStubs) {
+      const v = preImported.get(stub.key);
+      if (v) varMap.set(stub.key, v);
+    }
+  } else {
+    // Fallback: import all stubs now (used when called without a pre-built cache)
+    const imported = await Promise.allSettled(
+      colorStubs.map(s => figma.variables.importVariableByKeyAsync(s.key))
+    );
+    for (let i = 0; i < imported.length; i++) {
+      const r = imported[i];
+      if (r.status === 'fulfilled') varMap.set(colorStubs[i].key, r.value);
+    }
+  }
 
   const suggestions: (TokenSuggestion & { variableKey: string })[] = [];
 
-  for (let i = 0; i < imported.length; i++) {
-    const result = imported[i];
-    if (result.status !== 'fulfilled') continue;
+  for (const stub of colorStubs) {
+    const variable = varMap.get(stub.key);
+    if (!variable) continue;
 
-    const variable = result.value;
     const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
     if (!collection) continue;
 
@@ -192,7 +237,7 @@ export async function importAndMatchColors(
     if (matchScore >= 1 - tolerance) {
       suggestions.push({
         variableId: variable.id,
-        variableKey: colorStubs[i].key,
+        variableKey: stub.key,
         variableName: variable.name,
         collectionName: collection.name,
         value: rgbToHex(varColor.r, varColor.g, varColor.b),
@@ -208,19 +253,36 @@ export async function importAndMatchColors(
 /**
  * Import FLOAT library variable stubs, compare against a target pixel value
  * with property-name affinity scoring, and return sorted suggestions.
+ *
+ * Pass a `preImported` cache (from importStubsBatched) to skip re-importing stubs
+ * that were already imported for another token in the same analysis pass.
  */
 export async function importAndMatchFloats(
   pixelValue: number,
   propertyPath: string,
   stubs: LibraryVariable[],
-  tolerance: number
+  tolerance: number,
+  preImported?: Map<string, Variable>
 ): Promise<(TokenSuggestion & { variableKey: string })[]> {
   const floatStubs = stubs.filter(s => s.resolvedType === 'FLOAT');
   if (floatStubs.length === 0) return [];
 
-  const imported = await Promise.allSettled(
-    floatStubs.map(s => figma.variables.importVariableByKeyAsync(s.key))
-  );
+  // Build a key→Variable map — use pre-built cache when available
+  const varMap = new Map<string, Variable>();
+  if (preImported) {
+    for (const stub of floatStubs) {
+      const v = preImported.get(stub.key);
+      if (v) varMap.set(stub.key, v);
+    }
+  } else {
+    const imported = await Promise.allSettled(
+      floatStubs.map(s => figma.variables.importVariableByKeyAsync(s.key))
+    );
+    for (let i = 0; i < imported.length; i++) {
+      const r = imported[i];
+      if (r.status === 'fulfilled') varMap.set(floatStubs[i].key, r.value);
+    }
+  }
 
   const affinityMap: Record<string, string[]> = {
     strokeWeight: ['stroke', 'border-width', 'border/width', 'borderwidth'],
@@ -240,11 +302,10 @@ export async function importAndMatchFloats(
 
   const suggestions: (TokenSuggestion & { variableKey: string })[] = [];
 
-  for (let i = 0; i < imported.length; i++) {
-    const result = imported[i];
-    if (result.status !== 'fulfilled') continue;
+  for (const stub of floatStubs) {
+    const variable = varMap.get(stub.key);
+    if (!variable) continue;
 
-    const variable = result.value;
     const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
     if (!collection) continue;
 
@@ -267,7 +328,7 @@ export async function importAndMatchFloats(
 
     suggestions.push({
       variableId: variable.id,
-      variableKey: floatStubs[i].key,
+      variableKey: stub.key,
       variableName: variable.name,
       collectionName: collection.name,
       value: `${value}px`,

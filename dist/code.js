@@ -174,19 +174,46 @@
       return [];
     }
   }
-  async function importAndMatchColors(hexColor, stubs, tolerance) {
+  async function importStubsBatched(stubs, batchSize = 20) {
+    const cache = /* @__PURE__ */ new Map();
+    for (let i = 0; i < stubs.length; i += batchSize) {
+      const batch = stubs.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map((s) => figma.variables.importVariableByKeyAsync(s.key))
+      );
+      for (let j = 0; j < results.length; j++) {
+        const r = results[j];
+        if (r.status === "fulfilled") {
+          cache.set(batch[j].key, r.value);
+        }
+      }
+    }
+    return cache;
+  }
+  async function importAndMatchColors(hexColor, stubs, tolerance, preImported) {
     const targetRgb = hexToRgb(hexColor);
     if (!targetRgb) return [];
     const colorStubs = stubs.filter((s) => s.resolvedType === "COLOR");
     if (colorStubs.length === 0) return [];
-    const imported = await Promise.allSettled(
-      colorStubs.map((s) => figma.variables.importVariableByKeyAsync(s.key))
-    );
+    const varMap = /* @__PURE__ */ new Map();
+    if (preImported) {
+      for (const stub of colorStubs) {
+        const v = preImported.get(stub.key);
+        if (v) varMap.set(stub.key, v);
+      }
+    } else {
+      const imported = await Promise.allSettled(
+        colorStubs.map((s) => figma.variables.importVariableByKeyAsync(s.key))
+      );
+      for (let i = 0; i < imported.length; i++) {
+        const r = imported[i];
+        if (r.status === "fulfilled") varMap.set(colorStubs[i].key, r.value);
+      }
+    }
     const suggestions = [];
-    for (let i = 0; i < imported.length; i++) {
-      const result = imported[i];
-      if (result.status !== "fulfilled") continue;
-      const variable = result.value;
+    for (const stub of colorStubs) {
+      const variable = varMap.get(stub.key);
+      if (!variable) continue;
       const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
       if (!collection) continue;
       const modeId = collection.modes[0].modeId;
@@ -197,7 +224,7 @@
       if (matchScore >= 1 - tolerance) {
         suggestions.push({
           variableId: variable.id,
-          variableKey: colorStubs[i].key,
+          variableKey: stub.key,
           variableName: variable.name,
           collectionName: collection.name,
           value: rgbToHex(varColor.r, varColor.g, varColor.b),
@@ -208,12 +235,24 @@
     }
     return suggestions.sort((a, b) => b.matchScore - a.matchScore);
   }
-  async function importAndMatchFloats(pixelValue, propertyPath, stubs, tolerance) {
+  async function importAndMatchFloats(pixelValue, propertyPath, stubs, tolerance, preImported) {
     const floatStubs = stubs.filter((s) => s.resolvedType === "FLOAT");
     if (floatStubs.length === 0) return [];
-    const imported = await Promise.allSettled(
-      floatStubs.map((s) => figma.variables.importVariableByKeyAsync(s.key))
-    );
+    const varMap = /* @__PURE__ */ new Map();
+    if (preImported) {
+      for (const stub of floatStubs) {
+        const v = preImported.get(stub.key);
+        if (v) varMap.set(stub.key, v);
+      }
+    } else {
+      const imported = await Promise.allSettled(
+        floatStubs.map((s) => figma.variables.importVariableByKeyAsync(s.key))
+      );
+      for (let i = 0; i < imported.length; i++) {
+        const r = imported[i];
+        if (r.status === "fulfilled") varMap.set(floatStubs[i].key, r.value);
+      }
+    }
     const affinityMap = {
       strokeWeight: ["stroke", "border-width", "border/width", "borderwidth"],
       cornerRadius: ["radius", "corner", "round", "border-radius"],
@@ -230,10 +269,9 @@
     };
     const keywords = affinityMap[propertyPath] || [];
     const suggestions = [];
-    for (let i = 0; i < imported.length; i++) {
-      const result = imported[i];
-      if (result.status !== "fulfilled") continue;
-      const variable = result.value;
+    for (const stub of floatStubs) {
+      const variable = varMap.get(stub.key);
+      if (!variable) continue;
       const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
       if (!collection) continue;
       const modeId = collection.modes[0].modeId;
@@ -250,7 +288,7 @@
       }
       suggestions.push({
         variableId: variable.id,
-        variableKey: floatStubs[i].key,
+        variableKey: stub.key,
         variableName: variable.name,
         collectionName: collection.name,
         value: `${value}px`,
@@ -1313,34 +1351,39 @@
       token.matchConfidence = matchScore;
     }
     const colorVars = varsForType("colors");
+    const spacingVars = varsForType("spacing");
+    const borderVars = varsForType("borders");
+    const allStubs = [...colorVars, ...spacingVars, ...borderVars];
+    const uniqueStubs = [...new Map(allStubs.map((s) => [s.key, s])).values()];
+    console.log(`matchTokensToVariables: pre-importing ${uniqueStubs.length} unique stubs (batch=20)...`);
+    const importCache = await importStubsBatched(uniqueStubs, 20);
+    console.log(`matchTokensToVariables: import cache ready (${importCache.size} variables)`);
     for (const token of analysis.colors) {
       if (token.source !== "hard-coded" || token.isDefaultVariantStyle) continue;
       if (!token.value || !token.value.startsWith("#")) continue;
-      const matches = await importAndMatchColors(token.value, colorVars, colorTolerance);
+      const matches = await importAndMatchColors(token.value, colorVars, colorTolerance, importCache);
       if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
         const best = matches[0];
         annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
       }
     }
-    const spacingVars = varsForType("spacing");
     for (const token of analysis.spacing) {
       if (token.source !== "hard-coded" || token.isDefaultVariantStyle) continue;
       const px = parseFloat(token.value);
       if (isNaN(px)) continue;
       const property = ((_a = token.context) == null ? void 0 : _a.property) || "paddingTop";
-      const matches = await importAndMatchFloats(px, property, spacingVars, spacingTolerance);
+      const matches = await importAndMatchFloats(px, property, spacingVars, spacingTolerance, importCache);
       if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
         const best = matches[0];
         annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
       }
     }
-    const borderVars = varsForType("borders");
     for (const token of analysis.borders) {
       if (token.source !== "hard-coded" || token.isDefaultVariantStyle) continue;
       const px = parseFloat(token.value);
       if (isNaN(px)) continue;
       const property = ((_b = token.context) == null ? void 0 : _b.property) || "cornerRadius";
-      const matches = await importAndMatchFloats(px, property, borderVars, spacingTolerance);
+      const matches = await importAndMatchFloats(px, property, borderVars, spacingTolerance, importCache);
       if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
         const best = matches[0];
         annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);

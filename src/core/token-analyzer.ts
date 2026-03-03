@@ -6,6 +6,7 @@ import {
   getLibraryVariables,
   importAndMatchColors,
   importAndMatchFloats,
+  importStubsBatched,
   LibraryVariable,
 } from '../fixes/token-fixer';
 
@@ -817,16 +818,31 @@ export async function matchTokensToVariables(
     token.matchConfidence = matchScore;
   }
 
-  // --- Colors ---
-  // importAndMatchColors imports stubs in parallel, then reads valuesByMode from
-  // the local copies to compare. This is the only correct way to get library variable
-  // values — LibraryVariable stubs from the team library API have no valuesByMode.
+  // Pre-compute vars for all three token types upfront so we can deduplicate stubs
   const colorVars = varsForType('colors');
+  const spacingVars = varsForType('spacing');
+  const borderVars = varsForType('borders');
+
+  // Import all stubs ONCE (batched) before any matching loops.
+  // Without this, importAndMatchColors/Floats would re-import all stubs on every
+  // per-token call (e.g., 3 hardcoded colors × 50 stubs = 150 import calls).
+  // Batching also prevents flooding the Figma API with hundreds of parallel requests
+  // that would push total analysis time over the API Gateway timeout.
+  const allStubs = [...colorVars, ...spacingVars, ...borderVars];
+  const uniqueStubs = [...new Map(allStubs.map(s => [s.key, s])).values()];
+  console.log(`matchTokensToVariables: pre-importing ${uniqueStubs.length} unique stubs (batch=20)...`);
+  const importCache = await importStubsBatched(uniqueStubs, 20);
+  console.log(`matchTokensToVariables: import cache ready (${importCache.size} variables)`);
+
+  // --- Colors ---
+  // importAndMatchColors reads valuesByMode from local variable copies to compare.
+  // Library variable stubs from the team library API have no valuesByMode — importing
+  // is the only way to access values, which is why we pre-import above.
   for (const token of analysis.colors) {
     if (token.source !== 'hard-coded' || token.isDefaultVariantStyle) continue;
     if (!token.value || !token.value.startsWith('#')) continue;
 
-    const matches = await importAndMatchColors(token.value, colorVars, colorTolerance);
+    const matches = await importAndMatchColors(token.value, colorVars, colorTolerance, importCache);
     if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
       const best = matches[0];
       annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
@@ -834,14 +850,13 @@ export async function matchTokensToVariables(
   }
 
   // --- Spacing ---
-  const spacingVars = varsForType('spacing');
   for (const token of analysis.spacing) {
     if (token.source !== 'hard-coded' || token.isDefaultVariantStyle) continue;
     const px = parseFloat(token.value);
     if (isNaN(px)) continue;
     const property = token.context?.property || 'paddingTop';
 
-    const matches = await importAndMatchFloats(px, property, spacingVars, spacingTolerance);
+    const matches = await importAndMatchFloats(px, property, spacingVars, spacingTolerance, importCache);
     if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
       const best = matches[0];
       annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
@@ -849,14 +864,13 @@ export async function matchTokensToVariables(
   }
 
   // --- Borders (radius + stroke weight) ---
-  const borderVars = varsForType('borders');
   for (const token of analysis.borders) {
     if (token.source !== 'hard-coded' || token.isDefaultVariantStyle) continue;
     const px = parseFloat(token.value);
     if (isNaN(px)) continue;
     const property = token.context?.property || 'cornerRadius';
 
-    const matches = await importAndMatchFloats(px, property, borderVars, spacingTolerance);
+    const matches = await importAndMatchFloats(px, property, borderVars, spacingTolerance, importCache);
     if (matches.length > 0 && matches[0].matchScore >= CONFIDENCE_GATE) {
       const best = matches[0];
       annotate(token, best.variableId, best.variableKey, best.variableName, best.matchScore);
