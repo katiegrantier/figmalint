@@ -108,14 +108,28 @@ export interface LibraryVariable {
 export async function getLibraryVariables(libraryNames: string[]): Promise<LibraryVariable[]> {
   if (!libraryNames || libraryNames.length === 0) return [];
 
+  // Diagnose API availability
+  if (!figma.teamLibrary) {
+    console.warn('getLibraryVariables: figma.teamLibrary is not available in this context');
+    return [];
+  }
+
   try {
+    console.log('getLibraryVariables: fetching all library collections...');
     const allCollections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+    console.log(`getLibraryVariables: found ${allCollections.length} total collections`);
+    if (allCollections.length > 0) {
+      console.log('getLibraryVariables: available library names:', [...new Set(allCollections.map(c => c.libraryName))]);
+    }
+
     const matchingCollections = allCollections.filter(col => libraryNames.includes(col.libraryName));
+    console.log(`getLibraryVariables: ${matchingCollections.length} collections match configured libraries [${libraryNames.join(', ')}]`);
 
     const results: LibraryVariable[] = [];
     for (const collection of matchingCollections) {
       try {
         const vars = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(collection.key);
+        console.log(`getLibraryVariables: fetched ${vars.length} variables from "${collection.name}" (${collection.libraryName})`);
         for (const v of vars) {
           results.push({
             key: v.key,
@@ -131,7 +145,8 @@ export async function getLibraryVariables(libraryNames: string[]): Promise<Libra
     }
     return results;
   } catch (err) {
-    console.warn('getLibraryVariables failed:', err);
+    const e = err as Error;
+    console.warn('getLibraryVariables failed:', e.message || e, e.stack);
     return [];
   }
 }

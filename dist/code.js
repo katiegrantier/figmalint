@@ -136,13 +136,24 @@
   // src/fixes/token-fixer.ts
   async function getLibraryVariables(libraryNames) {
     if (!libraryNames || libraryNames.length === 0) return [];
+    if (!figma.teamLibrary) {
+      console.warn("getLibraryVariables: figma.teamLibrary is not available in this context");
+      return [];
+    }
     try {
+      console.log("getLibraryVariables: fetching all library collections...");
       const allCollections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+      console.log(`getLibraryVariables: found ${allCollections.length} total collections`);
+      if (allCollections.length > 0) {
+        console.log("getLibraryVariables: available library names:", [...new Set(allCollections.map((c) => c.libraryName))]);
+      }
       const matchingCollections = allCollections.filter((col) => libraryNames.includes(col.libraryName));
+      console.log(`getLibraryVariables: ${matchingCollections.length} collections match configured libraries [${libraryNames.join(", ")}]`);
       const results = [];
       for (const collection of matchingCollections) {
         try {
           const vars = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(collection.key);
+          console.log(`getLibraryVariables: fetched ${vars.length} variables from "${collection.name}" (${collection.libraryName})`);
           for (const v of vars) {
             results.push({
               key: v.key,
@@ -158,7 +169,8 @@
       }
       return results;
     } catch (err) {
-      console.warn("getLibraryVariables failed:", err);
+      const e = err;
+      console.warn("getLibraryVariables failed:", e.message || e, e.stack);
       return [];
     }
   }
