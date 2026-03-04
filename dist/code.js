@@ -268,10 +268,28 @@
       counterAxisSpacing: ["gap", "spacing", "space"]
     };
     const keywords = affinityMap[propertyPath] || [];
+    const propertyToScope = {
+      cornerRadius: "CORNER_RADIUS",
+      topLeftRadius: "CORNER_RADIUS",
+      topRightRadius: "CORNER_RADIUS",
+      bottomLeftRadius: "CORNER_RADIUS",
+      bottomRightRadius: "CORNER_RADIUS",
+      strokeWeight: "STROKE_FLOAT",
+      paddingTop: "GAP",
+      paddingRight: "GAP",
+      paddingBottom: "GAP",
+      paddingLeft: "GAP",
+      itemSpacing: "GAP",
+      counterAxisSpacing: "GAP"
+    };
+    const expectedScope = propertyToScope[propertyPath];
     const suggestions = [];
     for (const stub of floatStubs) {
       const variable = varMap.get(stub.key);
       if (!variable) continue;
+      if (expectedScope && variable.scopes.length > 0 && !variable.scopes.includes("ALL_SCOPES")) {
+        if (!variable.scopes.includes(expectedScope)) continue;
+      }
       const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
       if (!collection) continue;
       const modeId = collection.modes[0].modeId;

@@ -300,11 +300,37 @@ export async function importAndMatchFloats(
   };
   const keywords = affinityMap[propertyPath] || [];
 
+  // Map each property to the Figma VariableScope it should bind to.
+  // Variables with explicit scopes that don't include the expected scope are
+  // skipped — this prevents e.g. a FONT_SIZE=12 variable from winning over a
+  // CORNER_RADIUS=12 variable when matching a cornerRadius property.
+  const propertyToScope: Partial<Record<string, VariableScope>> = {
+    cornerRadius: 'CORNER_RADIUS',
+    topLeftRadius: 'CORNER_RADIUS',
+    topRightRadius: 'CORNER_RADIUS',
+    bottomLeftRadius: 'CORNER_RADIUS',
+    bottomRightRadius: 'CORNER_RADIUS',
+    strokeWeight: 'STROKE_FLOAT',
+    paddingTop: 'GAP',
+    paddingRight: 'GAP',
+    paddingBottom: 'GAP',
+    paddingLeft: 'GAP',
+    itemSpacing: 'GAP',
+    counterAxisSpacing: 'GAP',
+  };
+  const expectedScope = propertyToScope[propertyPath] as VariableScope | undefined;
+
   const suggestions: (TokenSuggestion & { variableKey: string })[] = [];
 
   for (const stub of floatStubs) {
     const variable = varMap.get(stub.key);
     if (!variable) continue;
+
+    // Skip variables whose declared Figma scope explicitly excludes this property.
+    // Variables with ALL_SCOPES or an empty scope array are always eligible.
+    if (expectedScope && variable.scopes.length > 0 && !variable.scopes.includes('ALL_SCOPES')) {
+      if (!variable.scopes.includes(expectedScope)) continue;
+    }
 
     const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
     if (!collection) continue;
