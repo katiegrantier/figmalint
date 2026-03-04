@@ -314,7 +314,7 @@
       if (keywords.length > 0) {
         const nameLower = variable.name.toLowerCase();
         if (keywords.some((kw) => nameLower.includes(kw))) {
-          matchScore = Math.min(matchScore + 0.3, 1);
+          matchScore += 0.3;
         }
       }
       suggestions.push({
@@ -327,7 +327,13 @@
         type: "number"
       });
     }
-    return suggestions.sort((a, b) => b.matchScore - a.matchScore);
+    const sorted = suggestions.sort((a, b) => b.matchScore - a.matchScore);
+    if (sorted.length > 0) {
+      console.log(`[float-match] ${propertyPath}=${pixelValue} \u2192 winner: "${sorted[0].variableName}" score=${sorted[0].matchScore.toFixed(2)} (${sorted.length} candidates)`);
+    } else {
+      console.log(`[float-match] ${propertyPath}=${pixelValue} \u2192 no candidates passed filters`);
+    }
+    return sorted;
   }
   async function bindColorToken(node, propertyType, variableId, paintIndex = 0) {
     try {

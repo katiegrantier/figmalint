@@ -360,11 +360,13 @@ export async function importAndMatchFloats(
 
     let matchScore = difference === 0 ? 1 : 1 - (difference / (tolerance || 1));
 
-    // Affinity boost
+    // Affinity boost — no cap so named matches score above 1.0 and win tiebreakers.
+    // e.g. Radius/Large (exact match + 'radius' keyword) = 1.3
+    //      Margins/Grid/Column Grid (exact match, no keyword) = 1.0 → loses sort
     if (keywords.length > 0) {
       const nameLower = variable.name.toLowerCase();
       if (keywords.some(kw => nameLower.includes(kw))) {
-        matchScore = Math.min(matchScore + 0.3, 1);
+        matchScore += 0.3;
       }
     }
 
@@ -379,7 +381,13 @@ export async function importAndMatchFloats(
     });
   }
 
-  return suggestions.sort((a, b) => b.matchScore - a.matchScore);
+  const sorted = suggestions.sort((a, b) => b.matchScore - a.matchScore);
+  if (sorted.length > 0) {
+    console.log(`[float-match] ${propertyPath}=${pixelValue} → winner: "${sorted[0].variableName}" score=${sorted[0].matchScore.toFixed(2)} (${sorted.length} candidates)`);
+  } else {
+    console.log(`[float-match] ${propertyPath}=${pixelValue} → no candidates passed filters`);
+  }
+  return sorted;
 }
 
 // ============================================================================
