@@ -287,9 +287,22 @@
     for (const stub of floatStubs) {
       const variable = varMap.get(stub.key);
       if (!variable) continue;
-      if (expectedScope && variable.scopes.length > 0 && !variable.scopes.includes("ALL_SCOPES")) {
-        if (!variable.scopes.includes(expectedScope)) continue;
+      if (expectedScope) {
+        const scopes = variable.scopes;
+        if (scopes.includes("ALL_SCOPES")) {
+          if (keywords.length > 0) {
+            const nameLower = variable.name.toLowerCase();
+            if (!keywords.some((kw) => nameLower.includes(kw))) {
+              console.log(`[scope-filter] SKIP "${variable.name}" (ALL_SCOPES, no name match for ${propertyPath})`);
+              continue;
+            }
+          }
+        } else if (scopes.length > 0 && !scopes.includes(expectedScope)) {
+          console.log(`[scope-filter] SKIP "${variable.name}" scopes=[${scopes.join(",")}] expected=${expectedScope}`);
+          continue;
+        }
       }
+      console.log(`[scope-filter] PASS "${variable.name}" scopes=[${variable.scopes.join(",")}] for ${propertyPath}=${pixelValue}`);
       const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
       if (!collection) continue;
       const modeId = collection.modes[0].modeId;

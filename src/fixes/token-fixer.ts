@@ -326,11 +326,27 @@ export async function importAndMatchFloats(
     const variable = varMap.get(stub.key);
     if (!variable) continue;
 
-    // Skip variables whose declared Figma scope explicitly excludes this property.
-    // Variables with ALL_SCOPES or an empty scope array are always eligible.
-    if (expectedScope && variable.scopes.length > 0 && !variable.scopes.includes('ALL_SCOPES')) {
-      if (!variable.scopes.includes(expectedScope)) continue;
+    // Scope-based filtering: prevent semantically wrong variables from binding.
+    if (expectedScope) {
+      const scopes = variable.scopes;
+      if (scopes.includes('ALL_SCOPES')) {
+        // ALL_SCOPES means "show everywhere in Figma's picker" — but that doesn't
+        // make a typography variable appropriate for cornerRadius. Require a name
+        // affinity match as a secondary gate for ALL_SCOPES variables.
+        if (keywords.length > 0) {
+          const nameLower = variable.name.toLowerCase();
+          if (!keywords.some(kw => nameLower.includes(kw))) {
+            console.log(`[scope-filter] SKIP "${variable.name}" (ALL_SCOPES, no name match for ${propertyPath})`);
+            continue;
+          }
+        }
+      } else if (scopes.length > 0 && !scopes.includes(expectedScope)) {
+        // Has explicit scopes but none match the expected one — skip.
+        console.log(`[scope-filter] SKIP "${variable.name}" scopes=[${scopes.join(',')}] expected=${expectedScope}`);
+        continue;
+      }
     }
+    console.log(`[scope-filter] PASS "${variable.name}" scopes=[${variable.scopes.join(',')}] for ${propertyPath}=${pixelValue}`);
 
     const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
     if (!collection) continue;
