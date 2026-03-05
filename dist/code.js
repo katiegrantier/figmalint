@@ -268,41 +268,31 @@
       counterAxisSpacing: ["gap", "spacing", "space"]
     };
     const keywords = affinityMap[propertyPath] || [];
-    const propertyToScope = {
-      cornerRadius: "CORNER_RADIUS",
-      topLeftRadius: "CORNER_RADIUS",
-      topRightRadius: "CORNER_RADIUS",
-      bottomLeftRadius: "CORNER_RADIUS",
-      bottomRightRadius: "CORNER_RADIUS",
-      strokeWeight: "STROKE_FLOAT",
-      paddingTop: "GAP",
-      paddingRight: "GAP",
-      paddingBottom: "GAP",
-      paddingLeft: "GAP",
-      itemSpacing: "GAP",
-      counterAxisSpacing: "GAP"
+    const propertyPrefixAllowlist = {
+      cornerRadius: ["radius"],
+      topLeftRadius: ["radius"],
+      topRightRadius: ["radius"],
+      bottomLeftRadius: ["radius"],
+      bottomRightRadius: ["radius"],
+      strokeWeight: ["border", "stroke"],
+      paddingTop: ["spacing", "size", "padding"],
+      paddingRight: ["spacing", "size", "padding"],
+      paddingBottom: ["spacing", "size", "padding"],
+      paddingLeft: ["spacing", "size", "padding"],
+      itemSpacing: ["spacing", "size", "gap"],
+      counterAxisSpacing: ["spacing", "size", "gap"]
     };
-    const expectedScope = propertyToScope[propertyPath];
+    const allowedPrefixes = propertyPrefixAllowlist[propertyPath];
     const suggestions = [];
     for (const stub of floatStubs) {
       const variable = varMap.get(stub.key);
       if (!variable) continue;
-      if (expectedScope) {
-        const scopes = variable.scopes;
-        if (scopes.includes("ALL_SCOPES")) {
-          if (keywords.length > 0) {
-            const nameLower = variable.name.toLowerCase();
-            if (!keywords.some((kw) => nameLower.includes(kw))) {
-              console.log(`[scope-filter] SKIP "${variable.name}" (ALL_SCOPES, no name match for ${propertyPath})`);
-              continue;
-            }
-          }
-        } else if (scopes.length > 0 && !scopes.includes(expectedScope)) {
-          console.log(`[scope-filter] SKIP "${variable.name}" scopes=[${scopes.join(",")}] expected=${expectedScope}`);
+      if (allowedPrefixes) {
+        const topGroup = variable.name.split("/")[0].toLowerCase();
+        if (!allowedPrefixes.some((p) => topGroup.startsWith(p))) {
           continue;
         }
       }
-      console.log(`[scope-filter] PASS "${variable.name}" scopes=[${variable.scopes.join(",")}] for ${propertyPath}=${pixelValue}`);
       const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
       if (!collection) continue;
       const modeId = collection.modes[0].modeId;

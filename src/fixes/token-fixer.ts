@@ -300,25 +300,27 @@ export async function importAndMatchFloats(
   };
   const keywords = affinityMap[propertyPath] || [];
 
-  // Map each property to the Figma VariableScope it should bind to.
-  // Variables with explicit scopes that don't include the expected scope are
-  // skipped — this prevents e.g. a FONT_SIZE=12 variable from winning over a
-  // CORNER_RADIUS=12 variable when matching a cornerRadius property.
-  const propertyToScope: Partial<Record<string, VariableScope>> = {
-    cornerRadius: 'CORNER_RADIUS',
-    topLeftRadius: 'CORNER_RADIUS',
-    topRightRadius: 'CORNER_RADIUS',
-    bottomLeftRadius: 'CORNER_RADIUS',
-    bottomRightRadius: 'CORNER_RADIUS',
-    strokeWeight: 'STROKE_FLOAT',
-    paddingTop: 'GAP',
-    paddingRight: 'GAP',
-    paddingBottom: 'GAP',
-    paddingLeft: 'GAP',
-    itemSpacing: 'GAP',
-    counterAxisSpacing: 'GAP',
+  // Hard prefix allowlist per property type.
+  // Only variables whose top-level name group starts with one of these prefixes
+  // are eligible. This is the most reliable guard: scope metadata is unreliable
+  // when variables use ALL_SCOPES, but name group reflects design intent.
+  // e.g. cornerRadius only accepts variables whose name begins with "radius" —
+  //   "Radius/Large" ✅   "Margins/Grid/Column Grid" ❌   "Text/..." ❌
+  const propertyPrefixAllowlist: Partial<Record<string, string[]>> = {
+    cornerRadius:       ['radius'],
+    topLeftRadius:      ['radius'],
+    topRightRadius:     ['radius'],
+    bottomLeftRadius:   ['radius'],
+    bottomRightRadius:  ['radius'],
+    strokeWeight:       ['border', 'stroke'],
+    paddingTop:         ['spacing', 'size', 'padding'],
+    paddingRight:       ['spacing', 'size', 'padding'],
+    paddingBottom:      ['spacing', 'size', 'padding'],
+    paddingLeft:        ['spacing', 'size', 'padding'],
+    itemSpacing:        ['spacing', 'size', 'gap'],
+    counterAxisSpacing: ['spacing', 'size', 'gap'],
   };
-  const expectedScope = propertyToScope[propertyPath] as VariableScope | undefined;
+  const allowedPrefixes = propertyPrefixAllowlist[propertyPath];
 
   const suggestions: (TokenSuggestion & { variableKey: string })[] = [];
 
@@ -326,27 +328,14 @@ export async function importAndMatchFloats(
     const variable = varMap.get(stub.key);
     if (!variable) continue;
 
-    // Scope-based filtering: prevent semantically wrong variables from binding.
-    if (expectedScope) {
-      const scopes = variable.scopes;
-      if (scopes.includes('ALL_SCOPES')) {
-        // ALL_SCOPES means "show everywhere in Figma's picker" — but that doesn't
-        // make a typography variable appropriate for cornerRadius. Require a name
-        // affinity match as a secondary gate for ALL_SCOPES variables.
-        if (keywords.length > 0) {
-          const nameLower = variable.name.toLowerCase();
-          if (!keywords.some(kw => nameLower.includes(kw))) {
-            console.log(`[scope-filter] SKIP "${variable.name}" (ALL_SCOPES, no name match for ${propertyPath})`);
-            continue;
-          }
-        }
-      } else if (scopes.length > 0 && !scopes.includes(expectedScope)) {
-        // Has explicit scopes but none match the expected one — skip.
-        console.log(`[scope-filter] SKIP "${variable.name}" scopes=[${scopes.join(',')}] expected=${expectedScope}`);
+    // Prefix allowlist check — evaluated against the top-level name group
+    // (first path segment before '/'), case-insensitive.
+    if (allowedPrefixes) {
+      const topGroup = variable.name.split('/')[0].toLowerCase();
+      if (!allowedPrefixes.some(p => topGroup.startsWith(p))) {
         continue;
       }
     }
-    console.log(`[scope-filter] PASS "${variable.name}" scopes=[${variable.scopes.join(',')}] for ${propertyPath}=${pixelValue}`);
 
     const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
     if (!collection) continue;
