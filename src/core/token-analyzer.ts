@@ -309,8 +309,8 @@ export async function extractDesignTokensFromNode(node: SceneNode): Promise<Toke
         }
       });
 
-      // Border radius variables
-      const radiusProps = ['topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'] as const;
+      // Border radius variables (includes unified cornerRadius and all 4 individual corners)
+      const radiusProps = ['cornerRadius', 'topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'] as const;
       radiusProps.forEach(prop => {
         if ((boundVars as any)[prop]) {
           console.log(`   🔄 Processing ${prop} variable...`);

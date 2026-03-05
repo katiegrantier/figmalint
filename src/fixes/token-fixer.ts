@@ -328,11 +328,13 @@ export async function importAndMatchFloats(
     const variable = varMap.get(stub.key);
     if (!variable) continue;
 
-    // Prefix allowlist check — evaluated against the top-level name group
-    // (first path segment before '/'), case-insensitive.
+    // Prefix allowlist check — any path segment must match an allowed prefix.
+    // Checking all segments (not just the first) handles libraries that nest
+    // radius under a category like "Size/Radius/..." while still blocking
+    // "Margins/Grid/..." from matching radius properties.
     if (allowedPrefixes) {
-      const topGroup = variable.name.split('/')[0].toLowerCase();
-      if (!allowedPrefixes.some(p => topGroup.startsWith(p))) {
+      const segments = variable.name.toLowerCase().split('/');
+      if (!allowedPrefixes.some(p => segments.some(seg => seg.startsWith(p)))) {
         continue;
       }
     }
@@ -907,10 +909,43 @@ export async function findBestMatchingVariable(
   };
 
   const keywords = affinityMap[propertyPath] || [];
-  if (keywords.length === 0) return suggestions;
+
+  // Hard prefix allowlist: radius properties must only match radius variables,
+  // spacing properties must only match spacing variables, etc.
+  // This prevents margin/typography variables from being suggested for corner radius
+  // (and vice versa) when they happen to share the same numeric value.
+  const propertyPrefixAllowlist: Partial<Record<string, string[]>> = {
+    cornerRadius:       ['radius'],
+    topLeftRadius:      ['radius'],
+    topRightRadius:     ['radius'],
+    bottomLeftRadius:   ['radius'],
+    bottomRightRadius:  ['radius'],
+    strokeWeight:       ['border', 'stroke'],
+    paddingTop:         ['spacing', 'size', 'padding'],
+    paddingRight:       ['spacing', 'size', 'padding'],
+    paddingBottom:      ['spacing', 'size', 'padding'],
+    paddingLeft:        ['spacing', 'size', 'padding'],
+    itemSpacing:        ['spacing', 'size', 'gap'],
+    counterAxisSpacing: ['spacing', 'size', 'gap'],
+  };
+  const allowedPrefixes = propertyPrefixAllowlist[propertyPath];
+
+  let filtered = suggestions;
+  if (allowedPrefixes) {
+    filtered = suggestions.filter(s => {
+      // Check ALL path segments, not just the top-level group.
+      // This handles libraries that nest radius under a category like "Size/Radius/..."
+      // while still blocking "Margins/Grid/..." from matching radius properties.
+      const segments = s.variableName.toLowerCase().split('/');
+      return allowedPrefixes.some(p => segments.some(seg => seg.startsWith(p)));
+    });
+  }
+
+  if (filtered.length === 0) return filtered;
+  if (keywords.length === 0) return filtered;
 
   // Boost scores for variables whose names match affinity keywords
-  const boosted = suggestions.map(s => {
+  const boosted = filtered.map(s => {
     const nameLower = s.variableName.toLowerCase();
     const hasAffinity = keywords.some(kw => nameLower.includes(kw));
     return {
